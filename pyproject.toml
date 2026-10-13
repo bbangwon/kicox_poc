@@ -1,0 +1,15 @@
+[project]
+name = "dgx-poc"
+version = "0.1.0"
+description = "qwen3.6 + LangGraph + FastMCP 오케스트레이션 시각화 PoC"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.0",
+    "fastmcp>=3.4,<4",
+    "langchain-mcp-adapters>=0.3.1",
+    "langchain-ollama>=1.1.0",
+    "langgraph>=1.2.15",
+    "sse-starlette>=3.5.0",
+    "uvicorn[standard]>=0.54.0",
+]
