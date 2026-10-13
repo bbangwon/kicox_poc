@@ -19,8 +19,8 @@
 React (Vite, :5173) ──SSE──▶ FastAPI (:8000) ──▶ LangGraph [planner → agent ⇄ tools]
                                                      │             │
                                           ChatOllama(qwen3.6)   langchain-mcp-adapters
-                                                                   ├─▶ FastMCP docs (:8101) search_internal_docs
-                                                                   └─▶ FastMCP ops  (:8102) calculate, send_email
+                                                                   ├─▶ FastMCP docs (:8101) search_internal_docs, get_training_policy
+                                                                   └─▶ FastMCP ops  (:8102) calculate, calculate_training_credits, send_email
 ```
 
 ### 실행
@@ -36,6 +36,7 @@ uv sync
 | 경로 | 내용 |
 | :--- | :--- |
 | `mcp_servers/` | FastMCP 서버 2종 (mock 데이터, 이메일은 실제 발송하지 않음) |
+| `get_training_policy` / `calculate_training_credits` | 인사팀 개인교육훈련비 지원 기준 조회, 이수학점 계산. 판단에 필요한 정보가 없으면 `need_info`와 역질문을 반환하고, 에이전트가 사용자에게 되묻는다 (같은 `thread_id`로 멀티턴 이어짐) |
 | `backend/graph.py` | LangGraph 그래프. 각 노드가 `get_stream_writer()`로 시각화 이벤트를 발행 |
 | `backend/app.py` | `GET /api/graph` (그래프 구조·MCP 도구 목록), `POST /api/chat` (실행 이벤트 SSE) |
 | `web/` | 채팅 / React Flow 그래프 / 실행 타임라인 3분할 UI |
