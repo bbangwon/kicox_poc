@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchGraph, streamChat } from './api'
 import { ChatPanel } from './components/ChatPanel'
 import { GraphView } from './components/GraphView'
+import { ScenarioPanel } from './components/ScenarioPanel'
 import { Timeline } from './components/Timeline'
 import { applyEvent, newRun } from './runReducer'
 import type { GraphInfo, Run } from './types'
@@ -29,9 +30,17 @@ export default function App() {
 
   useEffect(loadGraph, [loadGraph])
 
-  const send = async (text: string) => {
+  const reset = () => {
+    setRuns([])
+    setThreadId(null)
+    setSelectedId(null)
+  }
+
+  /** fresh=true면 이전 대화를 비우고 새 thread로 보낸다 (시나리오 첫 단계) */
+  const send = async (text: string, fresh = false) => {
     const id = crypto.randomUUID()
-    setRuns((rs) => [...rs, newRun(id, text, thinking)])
+    if (fresh) reset()
+    setRuns((rs) => [...(fresh ? [] : rs), newRun(id, text, thinking)])
     setSelectedId(id)
     setBusy(true)
     const ctrl = new AbortController()
@@ -39,7 +48,7 @@ export default function App() {
     const update = (fn: (r: Run) => Run) => setRuns((rs) => rs.map((r) => (r.id === id ? fn(r) : r)))
     try {
       await streamChat(
-        { message: text, thread_id: threadId, thinking },
+        { message: text, thread_id: fresh ? null : threadId, thinking },
         (e) => {
           if (e.type === 'run_start') setThreadId(e.thread_id)
           update((r) => applyEvent(r, e))
@@ -83,11 +92,7 @@ export default function App() {
             onSelect={setSelectedId}
             onSend={send}
             onStop={() => abort.current?.abort()}
-            onReset={() => {
-              setRuns([])
-              setThreadId(null)
-              setSelectedId(null)
-            }}
+            onReset={reset}
           />
         </section>
 
@@ -112,6 +117,11 @@ export default function App() {
         <section className="panel timeline-panel">
           <div className="panel-title">실행 타임라인</div>
           <Timeline run={selected} />
+        </section>
+
+        <section className="panel guide-panel">
+          <div className="panel-title">테스트 시나리오</div>
+          <ScenarioPanel busy={busy} onSend={send} />
         </section>
       </main>
     </div>

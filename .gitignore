@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# AI 서버 주소 등 접근 정보 (커밋 금지)
+*.env
+.env
+.env.*
+!.env.example

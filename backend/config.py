@@ -1,17 +1,32 @@
 """환경 설정. 모든 값은 환경변수로 덮어쓸 수 있다."""
 
 import os
+from pathlib import Path
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://192.168.0.58:11434")
-MODEL = os.getenv("LLM_MODEL", "qwen3.6:35b")
-# Ollama 기본 num_ctx는 작아서 도구 스키마·대화 이력이 잘릴 수 있으므로 명시한다.
-NUM_CTX = int(os.getenv("LLM_NUM_CTX", "32768"))
+# AI 서버 주소는 인증이 없어 주소 자체가 접근권이므로 코드에 두지 않는다.
+# 프로젝트 루트의 env 파일(.gitignore 대상)에서 읽고, 이미 설정된 환경변수가 우선한다.
+_ENV_FILE = Path(os.getenv("AI_ENDPOINTS_FILE", Path(__file__).resolve().parent.parent / "worker-ai-endpoints.env"))
+if _ENV_FILE.is_file():
+    for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        _key, _sep, _value = _line.partition("=")
+        if _sep and not _line.lstrip().startswith("#"):
+            os.environ.setdefault(_key.strip(), _value.strip())
+
+# vLLM OpenAI 호환 엔드포인트 (예: https://…/v1). 인증이 없어도 SDK에 api_key 문자열이 필요하다.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "EMPTY")
+MODEL = os.getenv("LLM_MODEL", "seed32-think")
 TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
-# LLM 서버의 일시적 오류(5xx, CUDA 오류, 연결 끊김) 시 재시도 횟수와 기본 대기 시간(초, 시도마다 증가)
+# 응답 하나의 최대 생성 토큰(Thinking 포함). 없으면 생각이 반복될 때 컨텍스트 끝(32K)까지 생성한다.
+MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+PLANNER_MAX_TOKENS = int(os.getenv("LLM_PLANNER_MAX_TOKENS", "512"))
+# 요청 하나의 최대 대기 시간(초). 서버 측 요청 타임아웃은 600초다.
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
+# LLM 서버의 일시적 오류(5xx, 연결 끊김) 시 재시도 횟수와 기본 대기 시간(초, 시도마다 증가)
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_DELAY = float(os.getenv("LLM_RETRY_DELAY", "2.0"))
 
 MCP_SERVERS = {
     "docs": {"url": os.getenv("MCP_DOCS_URL", "http://127.0.0.1:8101/mcp"), "transport": "streamable_http"},
-    "ops": {"url": os.getenv("MCP_OPS_URL", "http://127.0.0.1:8102/mcp"), "transport": "streamable_http"},
+    "training": {"url": os.getenv("MCP_TRAINING_URL", "http://127.0.0.1:8102/mcp"), "transport": "streamable_http"},
 }

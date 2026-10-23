@@ -25,7 +25,7 @@ done
 trap 'kill 0' EXIT
 
 uv run python -m mcp_servers.docs_server &
-uv run python -m mcp_servers.ops_server &
+uv run python -m mcp_servers.training_server &
 sleep 2
 uv run uvicorn backend.app:app --port 8000 --reload --reload-dir backend &
 (cd web && npm run dev -- --port 5173) &

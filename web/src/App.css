@@ -31,11 +31,11 @@ main {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(360px, 34%) 1fr;
+  grid-template-columns: minmax(340px, 30%) minmax(0, 1fr) minmax(300px, 340px);
   grid-template-rows: 50% 50%;
   grid-template-areas:
-    'chat graph'
-    'chat timeline';
+    'chat graph guide'
+    'chat timeline guide';
   gap: 10px;
   padding: 10px;
 }
@@ -58,6 +58,9 @@ main {
 }
 .timeline-panel {
   grid-area: timeline;
+}
+.guide-panel {
+  grid-area: guide;
 }
 
 .panel-title {
@@ -594,6 +597,148 @@ pre.thinking {
   text-transform: uppercase;
 }
 
+/* ---------- Scenarios ---------- */
+.scenarios {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.scenarios-intro {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scenario-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scenario-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.scenario {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scenario.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.scenario-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scenario-title {
+  font-weight: 600;
+}
+
+.badge.warn {
+  background: var(--plan-soft);
+  color: var(--plan);
+}
+
+.scenario-score {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--tool);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.scenario-goal {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.scenario-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scenario-steps li {
+  font-size: 13px;
+}
+
+.scenario-steps .step-text {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.scenario-steps button {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  font-size: 12px;
+}
+
+.scenario-steps button.ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.scenario-steps button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.scenario-checks {
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.scenario-checks label {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.scenario-checks input {
+  margin-top: 2px;
+}
+
+@media (max-width: 1280px) {
+  main {
+    grid-template-columns: minmax(320px, 34%) minmax(0, 1fr);
+    grid-template-rows: 50% 50% 60%;
+    grid-template-areas:
+      'chat graph'
+      'chat timeline'
+      'guide guide';
+    overflow-y: auto;
+  }
+}
+
 @media (max-width: 900px) {
   header {
     flex-wrap: wrap;
@@ -604,8 +749,8 @@ pre.thinking {
   }
   main {
     grid-template-columns: 1fr;
-    grid-template-rows: 70vh 50vh 70vh;
-    grid-template-areas: 'chat' 'graph' 'timeline';
+    grid-template-rows: 70vh 50vh 70vh 70vh;
+    grid-template-areas: 'chat' 'graph' 'timeline' 'guide';
     overflow-y: auto;
   }
   .io {

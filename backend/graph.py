@@ -6,18 +6,18 @@
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Annotated, Literal
 
 import httpx
-import ollama
+import openai
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_ollama import ChatOllama
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -25,6 +25,7 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from backend import config as settings
+from backend.llm import ChatVLLM
 
 
 class AgentState(TypedDict):
@@ -32,14 +33,19 @@ class AgentState(TypedDict):
     plan: list[str]
 
 
-def _llm(thinking: bool) -> ChatOllama:
-    return ChatOllama(
-        base_url=settings.OLLAMA_BASE_URL,
+def _llm(thinking: bool) -> ChatVLLM:
+    if not settings.LLM_BASE_URL:
+        raise RuntimeError("LLM_BASE_URL이 설정되지 않았습니다 (worker-ai-endpoints.env 또는 환경변수)")
+    return ChatVLLM(
+        base_url=settings.LLM_BASE_URL,
+        api_key=settings.LLM_API_KEY,
         model=settings.MODEL,
-        reasoning=thinking,
-        num_ctx=settings.NUM_CTX,
         temperature=settings.TEMPERATURE,
-        keep_alive="30m",
+        max_tokens=settings.MAX_TOKENS,
+        timeout=settings.LLM_TIMEOUT,
+        max_retries=0,  # 재시도는 _with_retry가 담당한다 (llm_retry 이벤트 발행)
+        stream_usage=True,
+        extra_body={"chat_template_kwargs": {"thinking": thinking}},
     )
 
 
@@ -72,23 +78,24 @@ def _text(content) -> str:
 
 
 def _llm_stats(msg: AIMessage, ms: int) -> dict:
-    meta = msg.response_metadata or {}
-    eval_count = meta.get("eval_count")
-    eval_ns = meta.get("eval_duration")
+    usage = msg.usage_metadata or {}
+    output_tokens = usage.get("output_tokens")
     return {
         "ms": ms,
-        "input_tokens": meta.get("prompt_eval_count"),
-        "output_tokens": eval_count,
-        "tps": round(eval_count / (eval_ns / 1e9), 1) if eval_count and eval_ns else None,
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": output_tokens,
+        # vLLM은 생성 시간을 따로 주지 않으므로 첫 토큰 대기 시간을 포함한 전체 시간 기준이다.
+        "tps": round(output_tokens / (ms / 1000), 1) if output_tokens and ms else None,
+        # "length"면 max_tokens에서 잘린 응답이다
+        "finish_reason": (msg.response_metadata or {}).get("finish_reason"),
     }
 
 
 def _retryable(e: Exception) -> bool:
     """서버 측 일시 오류만 재시도한다. 4xx(모델 없음 등)는 재시도해도 소용없으므로 제외."""
-    if isinstance(e, ollama.ResponseError):
-        # status_code -1: 스트리밍 도중 서버가 보낸 오류 (CUDA 오류 등)
-        return e.status_code >= 500 or e.status_code == -1
-    return isinstance(e, (ConnectionError, httpx.TransportError))
+    if isinstance(e, openai.APIStatusError):
+        return e.status_code >= 500
+    return isinstance(e, (openai.APIConnectionError, ConnectionError, httpx.TransportError))
 
 
 async def _with_retry[T](node: str, call: Callable[[], Awaitable[T]]) -> T:
@@ -111,37 +118,68 @@ async def _with_retry[T](node: str, call: Callable[[], Awaitable[T]]) -> T:
     raise AssertionError("unreachable")
 
 
-PLANNER_PROMPT = """당신은 업무 자동화 에이전트의 플래너입니다.
-사용자의 마지막 요청을 처리하기 위한 실행 계획을 짧은 한국어 단계로 작성하세요.
-마지막 메시지가 직전 역질문에 대한 답변이면, 이전 대화의 원래 요청과 합쳐서 계획을 세웁니다.
+def _parse_steps(text: str) -> list[str]:
+    """{"steps": [...]} 응답에서 단계를 꺼낸다. 닫는 괄호가 없거나 잘린 응답이면 완성된 문자열만 쓴다."""
+    try:
+        return [str(s) for s in json.loads(text).get("steps", [])]
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    _, sep, rest = text.partition('"steps"')
+    return [json.loads(f'"{m}"') for m in re.findall(r'"((?:[^"\\]|\\.)*)"', rest)] if sep else []
+
+
+PLANNER_PROMPT = """당신은 한국산업단지공단 내부규정 Q&A 에이전트의 플래너입니다.
+사용자의 마지막 메시지에 답하기 위한 실행 계획을 짧은 한국어 단계로 작성하세요.
+마지막 메시지가 직전 역질문에 대한 답변이면, 이전 대화의 원래 질문과 합쳐서 계획을 세웁니다.
+{scope}
 사용 가능한 도구:
 {tools}
 
 규칙:
-- 도구가 필요 없으면 단계 하나("직접 답변")만 작성합니다.
-- 판단에 필요한 정보가 부족하면 "사용자에게 부족한 정보 역질문" 단계를 포함합니다.
-- 각 단계는 한 문장, 최대 5단계.
-- 반드시 JSON으로만 응답: {{"steps": ["...", "..."]}}"""
+- 각 단계는 "도구명(조회 항목): 목적" 또는 "사용자에게 역질문: 무엇을" 또는 "직접 답변: 이유" 형식의 한 문장입니다.
+- 답변 범위 밖의 질문, 규정에 없는 내용(금액·한도·잔액 등), 인사말은 단계 하나("직접 답변: …")만 작성합니다.
+- 최대 4단계. 반드시 JSON으로만 응답: {{"steps": ["...", "..."]}}"""
 
-AGENT_PROMPT = """당신은 사내 업무를 돕는 한국어 AI 에이전트입니다.
-필요하면 제공된 도구를 호출하고, 도구 결과에 근거해서만 수치를 말하세요.
-수치 계산은 반드시 calculate 도구를 사용하세요.
-모든 작업이 끝나면 수행한 내용을 간결하게 한국어로 보고하세요.
+SCOPE = """답변 범위: 개인교육훈련비 지원 기준(인사팀) — 지원대상·제외대상, 과세 여부, 교육신청 경로(MIS), 학점구분·직무구분, 이수학점.
+범위 밖: 여비(출장비·숙박비·자가용 운임·국외출장·부임여비 등)를 포함한 그 밖의 규정, 개인별 사용액·잔액 조회.
+담당 부서: 개인교육훈련비(지원 금액·한도·개인별 잔액 포함)는 인사팀, 여비는 상생복지팀."""
 
-개인교육훈련(교육비 지원 여부, 과세 여부, 이수학점, 교육신청) 질문:
-- 답변 전에 반드시 get_training_policy로 규정을 확인하고, 규정 문구를 근거로 판단하세요.
-- 이수학점은 calculate_training_credits 도구로 계산하세요. 사용자가 말하지 않은 인자는 추측하지 말고 생략하세요.
+AGENT_PROMPT = """당신은 한국산업단지공단 직원의 내부규정 질문에 답하는 한국어 상담 에이전트입니다.
+{scope}
 
-역질문(멀티턴) 규칙:
-- 판단에 꼭 필요한 정보가 대화에 없으면 추측하거나 가정해서 답하지 말고, 사용자에게 되물은 뒤 답변을 마치세요.
-  예) 학점 질문인데 사내외교육·사회공헌활동·학위과정 중 무엇인지 모름, 교육 시간을 모름,
-      지원 여부 질문인데 교육 내용이 현직무·IDP 희망직무와 관련 있는지 모름.
-- 도구가 status="need_info"를 반환하면 questions의 내용을 사용자에게 질문하세요.
-- 질문은 한 번에 모아서 짧은 번호 목록으로 하고, 가능하면 선택지를 함께 제시하세요.
-- 사용자가 답하면 이전 대화의 원래 질문과 합쳐서 다시 판단하세요.
-- 결과에 conditions가 있으면 "~인 경우에 한해 인정"처럼 조건을 함께 안내하세요.
+## 근거 원칙
+- 규정 원문(get_training_policy 결과)과 도구 결과에 있는 내용만 말하세요. 기억이나 일반 상식으로 규정을 보충하지 마세요.
+- 규정에 없는 내용(교육훈련비 지원 금액·한도·잔액 등)은 추측하지 말고 "규정에 명시되어 있지 않아 인사팀 확인이 필요합니다"라고 안내하세요.
+  사원번호 등을 물어 조회해 주겠다고 하지 마세요. 당신은 개인 데이터를 조회할 수 없습니다.
+- 범위 밖 질문은 도구를 호출하지 말고, 지금은 답변할 수 없다는 것과 위 담당 부서를 안내하세요. 금액을 추정하지 마세요.
+- 학점 등 수치는 직접 계산하지 말고 도구 결과의 값을 그대로 쓰세요.
 
-실행 계획:
+## 지원범위 읽는 법
+- [지원대상]의 "직무 / 비과세", "공통 / 과세", "임금피크 / 과세"는 모두 **지원되는** 항목입니다. "과세"는 지원은 되지만 지원금이 과세된다는 뜻입니다.
+- 지원 불가는 [제외대상]에 해당하거나, 지원대상 항목의 단서(예: 취업·이직준비 목적 제외)에 걸리는 경우입니다.
+- 교육 내용이 현직무·IDP 희망직무와 관련 있는지에 따라 구분(직무/공통)과 과세가 달라지는데 대화에서 알 수 없으면, 추측하지 말고 업무 연관성을 되물으세요.
+
+## 도구 사용
+- 지원 여부·과세 질문: get_training_policy(section="지원범위,제외대상")로 원문을 확인한 뒤 답하세요.
+- 신청 경로·학점구분·직무구분 질문: get_training_policy로 해당 항목(신청방법·학점구분·직무구분)을 확인한 뒤 답하세요.
+- 이수학점 질문: calculate_training_credits를 바로 호출하세요 (도구에 학점 기준이 들어 있으므로 규정 조회가 필요 없습니다).
+  사용자가 말하지 않은 인자는 추측하지 말고 생략하세요. 어학·엑셀·OA 교육이면 credit_category="공통"을 넘기세요.
+
+## 역질문(멀티턴)
+- 도구가 status="need_info"를 반환하면 questions의 내용을 사용자에게 묻고 답변을 마치세요.
+- 질문은 한 번에 모아 짧은 번호 목록으로 하고, 가능하면 선택지를 함께 제시하세요.
+- 사용자가 답하면 이전 대화의 원래 질문과 합쳐서, 대화 전체에서 확인된 값을 모두 인자로 넘겨 다시 호출하세요. 이미 답한 것을 다시 묻지 마세요.
+
+## 답변 형식
+- 첫 문장에 결론을 쓰세요. (예: "지원됩니다. 다만 공통 교육이라 과세됩니다.", "1학점이 인정됩니다.")
+- 이어서 근거와 조건을 2~4개의 짧은 글머리표로 쓰세요. 결과에 conditions가 있으면 "~인 경우에 한해 인정"처럼 함께 안내하세요.
+- 규정을 근거로 답했으면 마지막 줄에 "근거: 개인교육훈련비 지원 기준 › <항목명>" 형식으로 표시하세요.
+  get_training_policy 결과 끝의 [근거 표기] 줄을 그대로 옮기고, 이수학점 계산이면 "개인교육훈련비 지원 기준 › 이수학점"을 씁니다.
+  역질문이나 범위 밖 안내에는 쓰지 않습니다.
+- 도구 이름, "규정을 조회하겠습니다" 같은 처리 과정, <cite> 같은 태그나 HTML은 쓰지 마세요.
+- "추가 질문이 있으면…", "다른 ~도 도와드릴 수 있습니다" 같은 맺음말로 끝내지 마세요. 근거 줄(또는 안내 문장)에서 답변을 끝냅니다.
+
+## 실행 계획 (참고용 — 위 규칙이 우선합니다)
 {plan}"""
 
 
@@ -151,17 +189,15 @@ def build_graph(tools: list[BaseTool], tool_servers: dict[str, str]):
 
     @_traced("planner")
     async def planner(state: AgentState, config: RunnableConfig):
-        llm = _llm(thinking=False).bind(format="json")
+        # JSON 모드(response_format)는 쓰지 않는다. seed32-think에서 가끔 끝나지 않고 상한까지 생성한다.
+        # 계획은 짧으므로 상한을 작게 두고, 잘리거나 괄호가 빠져도 _parse_steps가 완성된 단계만 꺼낸다.
+        llm = _llm(thinking=False).bind(max_tokens=settings.PLANNER_MAX_TOKENS)
         started = time.perf_counter()
         msg = await _with_retry(
             "planner",
-            lambda: llm.ainvoke([SystemMessage(PLANNER_PROMPT.format(tools=tool_catalog)), *state["messages"]]),
+            lambda: llm.ainvoke([SystemMessage(PLANNER_PROMPT.format(scope=SCOPE, tools=tool_catalog)), *state["messages"]]),
         )
-        try:
-            steps = [str(s) for s in json.loads(_text(msg.content)).get("steps", [])]
-        except (json.JSONDecodeError, AttributeError):
-            steps = []
-        steps = steps or ["직접 답변"]
+        steps = _parse_steps(_text(msg.content)) or ["직접 답변"]
         _emit("plan", steps=steps, stats=_llm_stats(msg, round((time.perf_counter() - started) * 1000)))
         return {"plan": steps}
 
@@ -170,7 +206,7 @@ def build_graph(tools: list[BaseTool], tool_servers: dict[str, str]):
         thinking = config["configurable"].get("thinking", True)
         llm = _llm(thinking).bind_tools(tools)
         plan = "\n".join(f"{i}. {s}" for i, s in enumerate(state.get("plan", []), 1))
-        messages = [SystemMessage(AGENT_PROMPT.format(plan=plan)), *state["messages"]]
+        messages = [SystemMessage(AGENT_PROMPT.format(scope=SCOPE, plan=plan)), *state["messages"]]
 
         async def stream_once():
             # 재시도 시 이전 시도의 부분 출력은 버린다 (프론트엔드도 llm_retry 수신 시 초기화)
@@ -186,9 +222,8 @@ def build_graph(tools: list[BaseTool], tool_servers: dict[str, str]):
         started = time.perf_counter()
         full = await _with_retry("agent", stream_once)
 
-        # additional_kwargs의 reasoning_content(Thinking)를 반드시 유지한다. ChatOllama는 이를 다음 호출 때
-        # assistant 메시지의 `thinking` 필드로 되돌려 보내는데, 이전 턴의 Thinking이 빠지면 qwen3.6이
-        # 도구 결과를 받은 뒤 Thinking만 하고 빈 응답으로 종료하는 현상이 자주 발생한다 (8회 중 4회 → 24회 중 0회).
+        # additional_kwargs의 reasoning_content(Thinking)는 기록용으로 유지하지만 다음 호출에는 보내지 않는다.
+        # seed32-think(vLLM)는 이를 다시 보내면 Thinking이 content로 새어 나온다 (backend/llm.py 참고).
         ai = AIMessage(
             content=full.content,
             additional_kwargs=full.additional_kwargs,

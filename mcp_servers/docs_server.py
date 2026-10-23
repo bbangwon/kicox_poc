@@ -1,33 +1,8 @@
-"""사내 문서 검색 MCP 서버 (mock 데이터 + 개인교육훈련비 지원 기준)."""
+"""사내 규정 조회 MCP 서버 (개인교육훈련비 지원 기준)."""
 
 from fastmcp import FastMCP
 
-mcp = FastMCP("docs", instructions="사내 문서 저장소를 검색하는 MCP 서버")
-
-DOCUMENTS = [
-    {
-        "id": "DOC-2026-Q3-01",
-        "title": "2026년 3분기 사업 실적 보고서",
-        "content": "2026년 3분기(지난 분기) 신규 가입자 수는 50,000명으로 전 분기 대비 8% 증가했습니다. "
-        "누적 가입자는 1,240,000명이며 월간 활성 사용자(MAU)는 410,000명입니다.",
-    },
-    {
-        "id": "DOC-2026-Q3-02",
-        "title": "2026년 3분기 매출 요약",
-        "content": "3분기 매출은 182억 원, 영업이익은 21억 원입니다. 구독 매출 비중은 64%입니다.",
-    },
-    {
-        "id": "DOC-ORG-01",
-        "title": "조직 연락처",
-        "content": "운영팀: ops@company.com / 마케팅팀: marketing@company.com / 재무팀: finance@company.com",
-    },
-    {
-        "id": "DOC-POLICY-07",
-        "title": "보고 메일 작성 가이드",
-        "content": "보고 메일은 제목에 [보고] 머리말을 붙이고, 본문은 요약-근거-요청사항 순으로 작성합니다.",
-    },
-]
-
+mcp = FastMCP("docs", instructions="사내 규정 원문을 조회하는 MCP 서버")
 
 # 산단공 개인교육훈련비 지원 기준 및 참고자료 (인사팀 제공 PDF 원문 정리)
 TRAINING_POLICY = {
@@ -73,37 +48,32 @@ TRAINING_POLICY = {
 }
 
 
+# 모델이 항목명 대신 쓰는 표현 → 항목명
+SECTION_ALIASES = {"지원대상": "지원범위", "과세": "지원범위", "학점": "이수학점", "신청": "신청방법"}
+
+
+def _match_sections(section: str) -> list[str]:
+    """"지원대상,제외대상"처럼 여러 항목이나 별칭을 넘겨도 해당 항목을 모두 찾는다."""
+    found = [name for name in TRAINING_POLICY if name in section]
+    found += [name for alias, name in SECTION_ALIASES.items() if alias in section and name not in found]
+    return [name for name in TRAINING_POLICY if name in found]
+
+
 @mcp.tool
 def get_training_policy(section: str | None = None) -> str:
-    """산단공 개인교육훈련비 지원 기준(지원대상·제외대상·과세여부·학점 지급기준·신청방법)을 조회합니다.
+    """산단공 개인교육훈련비 지원 기준(지원대상·제외대상·과세여부·학점 지급기준·신청방법) 원문을 조회합니다.
 
-    개인교육훈련, 교육비 지원 여부, 이수학점 관련 질문에는 답변 전에 반드시 이 규정을 확인하세요.
-
-    Args:
-        section: 조회할 항목. 지원범위, 제외대상, 신청방법, 학점구분, 직무구분, 이수학점 중 하나. 생략하면 전체를 반환합니다.
-    """
-    header = "[문서] 개인교육훈련비 지원 기준 및 참고자료 (인사팀)\n\n"
-    if section in TRAINING_POLICY:
-        return header + TRAINING_POLICY[section]
-    return header + "\n\n".join(TRAINING_POLICY.values())
-
-
-@mcp.tool
-def search_internal_docs(query: str, top_k: int = 2) -> list[dict]:
-    """사내 문서에서 질의와 관련된 문서를 검색합니다.
+    교육비 지원 여부, 과세 여부, 교육신청 경로, 학점구분·직무구분 질문에는 답변 전에 이 원문을 확인하세요.
+    이수학점 계산은 calculate_training_credits를 사용하세요.
 
     Args:
-        query: 검색할 한국어 질의 (예: "지난 분기 신규 가입자 수")
-        top_k: 반환할 최대 문서 수
+        section: 조회할 항목. 지원범위(지원대상·과세 구분), 제외대상, 신청방법, 학점구분, 직무구분, 이수학점 중 하나.
+            지원 여부 판단은 "지원범위,제외대상"처럼 쉼표로 여러 항목을 함께 조회하세요. 생략하면 전체를 반환합니다.
     """
-    terms = [t for t in query.replace(",", " ").split() if len(t) > 1]
-
-    def score(doc: dict) -> int:
-        text = doc["title"] + " " + doc["content"]
-        return sum(text.count(t) for t in terms)
-
-    ranked = sorted(DOCUMENTS, key=score, reverse=True)
-    return [d for d in ranked if score(d) > 0][:top_k] or ranked[:1]
+    names = _match_sections(section or "") or list(TRAINING_POLICY)
+    body = "\n\n".join(f"## 항목: {name}\n{TRAINING_POLICY[name]}" for name in names)
+    source = "개인교육훈련비 지원 기준 › " + "·".join(names)
+    return f"[문서] 개인교육훈련비 지원 기준 및 참고자료 (인사팀)\n\n{body}\n\n[근거 표기] {source}"
 
 
 if __name__ == "__main__":
