@@ -15,7 +15,7 @@
 | :--- | :--- | :--- |
 | 저장 범위 | PostgreSQL에는 **질의 처리와 재색인에 쓰는 것만** 넣는다. 쪽 대조 · 구조 트리 · 검사 결과 · 검증 기록은 전처리 산출물 파일이 원본으로 남는다 | 검증 · 디버깅은 전처리 뷰어가 맡음 (§3) |
 | 역할 분담 | PostgreSQL은 서비스 데이터의 원본, Qdrant는 PostgreSQL에서 다시 만들 수 있는 인덱스 | 설계 노트 §5.2 |
-| 로더 위치 | `kicox_poc`에 `ingest/` 모듈. 전처리 저장소는 DB를 모르고 **파일(JSON)만 계약**으로 넘긴다 | 전처리를 오프라인 배치 · 뷰어로 독립 유지 |
+| 로더 위치 | `kicox_poc`에 `ingest/` 모듈. 전처리 저장소는 DB를 모르고 **파일(JSON)만 계약**으로 넘긴다. 계약 형식은 `meta.json`의 `schema_version`으로 관리 | 색인 · 질의가 같은 `embed()` · `sparse()`를 써야 함. 설계 노트 §5.5, §2.3 |
 | 테이블 | `documents` · `sections` · `chunks` · `tools` · `document_tools` 5개 | §4 |
 | 판 관리 | 개정판마다 `doc_id`(PDF 해시)가 바뀌므로 `documents.regulation_key`(ALIO `idx`)로 묶고, 규정마다 현행 판 하나만 검색 | §2.2 |
 | 청크 ID | `uuid5(doc_id : 종류 : 내용 해시)` | 재청킹해도 내용이 같은 청크는 ID · 벡터 유지 (§5) |
@@ -38,7 +38,7 @@
 
 | 파일 | 내용 | 적재 |
 | :--- | :--- | :--- |
-| `meta.json` | `doc_id` · `name` · `pages` · `rule`(ALIO `idx` · 구분 · 제개정일) | `documents` |
+| `meta.json` | `schema_version`(산출물 형식 버전, §2.3) · `doc_id` · `name` · `pages` · `rule`(ALIO `idx` · 구분 · 제개정일) | `documents` (`schema_version`은 관문 판정에만 씀) |
 | `chunks.json` | `parents`(p01…) · `children`(c001…) | `sections`, `chunks` |
 | `summaries.json` | parent 요약(`covers` · `not_covers` · `keywords` · `questions`) · 문서 요약(`summary` · `keywords` · `questions` · `not_for`) | `sections`, `documents` |
 | `tools.json` | 문서 단위 도구 목록(`spec` · `spec_hash` · `checks.status`) | 승인된 것만 `tools` |
@@ -67,13 +67,29 @@
 | 맞춤형복리후생제도 운영지침 | 5 | 25 | 8 | 10 | 3,033 | 0 |
 | 보수규정 시행세칙 | 23 | 98 | 8 | 52 | 12,270 | 6 (error 3 · warn 1 · ready 2) |
 
+### 2.3 산출물 형식 버전 (계약)
+
+전처리와 적재는 저장소가 나뉘어 있고([RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.5) 둘 사이의 계약은 §2.1의 파일 형식 하나입니다. 형식이 바뀐 것을 로더가 알 수 있도록 `meta.json`에 정수 `schema_version`을 둡니다.
+
+| 항목 | 규칙 |
+| :--- | :--- |
+| 위치 · 값 | `meta.json`의 `schema_version` (정수). 문서 판 하나의 모든 산출물 파일에 적용 |
+| 올리는 경우 | 로더가 읽는 필드의 이름 변경 · 삭제 · 의미 변경(예: 청크 `hash` 계산식, `header` 형식, `verify.json` 키 규칙) |
+| 올리지 않는 경우 | 필드 추가, 로더가 읽지 않는 파일(§2.1 "적재하지 않음") 변경 |
+| 버전 1 | 커밋 `c97fd03` 형식. **`schema_version`이 없는 산출물은 1로 봅니다** (로컬 2건 · ALIO 138건이 여기에 해당) |
+| 로더 | 지원하는 버전 목록을 두고, 목록에 없는 버전은 관문에서 적재하지 않습니다(§7.1). 버전마다 pydantic 모델을 둡니다 |
+| 함께 바꾸기 | 전처리에서 버전을 올리는 커밋과 로더가 새 버전을 지원하는 커밋을 짝지어, 각 저장소의 변경 이력에 상대 커밋을 적습니다 |
+
+- 전처리 과제: `meta.json`에 `schema_version: 1`을 쓰기 시작합니다. 이미 만든 산출물은 다시 돌리지 않아도 됩니다(없으면 1).
+- 도구 승인 상태(`verify.json`)도 계약에 포함됩니다. 승인 판정은 전처리 뷰어에서 하고 로더는 읽기만 합니다.
+
 ---
 
 ## 3. 적재 원칙
 
 1. **PostgreSQL에는 질의 처리와 재색인에 쓰는 것만 넣습니다.** 열마다 router · planner · agent · MCP 도구 · 재색인 중 어디서 읽는지가 있어야 합니다(§4.2). 쪽 대조, 구조 트리, 도구 검사 결과, 검증 이력은 전처리 산출물 파일이 원본이고 전처리 뷰어에서 봅니다.
 2. **Qdrant는 PostgreSQL만으로 다시 만들 수 있어야 합니다.** 임베딩 모델을 바꿀 때 전처리 산출물을 다시 읽지 않습니다. 사람은 Qdrant를 직접 고치지 않습니다.
-3. **전처리와 적재는 파일로만 이어집니다.** 로더는 `data/docs/{doc_id}/`를 읽기만 하고 전처리 코드를 import하지 않습니다. 파일 형식은 로더 쪽 pydantic 모델로 검증하고, 형식이 바뀌면 명시적으로 실패합니다.
+3. **전처리와 적재는 파일로만 이어집니다.** 로더는 `data/docs/{doc_id}/`를 읽기만 하고 전처리 코드를 import하지 않습니다. 파일 형식은 `schema_version`(§2.3)과 로더 쪽 pydantic 모델로 검증하고, 형식이 바뀌면 명시적으로 실패합니다.
 4. **문서 판 1건이 적재 단위입니다.** 한 판의 행은 트랜잭션 하나로 넣고, 같은 입력으로 다시 실행해도 결과가 같아야 합니다(멱등).
 5. **원 프로젝트를 따르는 것과 새로 정하는 것을 나눕니다.** 임베딩 호출 · BM25 생성 · 컬렉션 별칭 · 재색인 절차는 [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §7.1을 따르고, 포인트 종류 · 임베딩 입력 · payload · 청크 ID는 새로 정합니다.
 6. **검색 결과는 PostgreSQL로 다시 거릅니다.** 필터 없는 검색을 막고, Qdrant 결과는 PostgreSQL에서 현행 판인지 확인한 뒤 씁니다.
@@ -288,6 +304,7 @@ flowchart LR
 | 사유 | 판정 |
 | :--- | :--- |
 | 필수 파일 없음 | `meta.json` · `chunks.json` · `summaries.json` |
+| 지원하지 않는 형식 버전 | `meta.schema_version`(없으면 1)이 로더의 지원 목록에 없음 (§2.3) |
 | 파일 형식 오류 | pydantic 검증 실패 |
 | 문서 요약 없음 | `summaries.doc.error` 있음 또는 `summary` 비어 있음 |
 | parent 요약 문제 | 빠진 parent, `error`, stale (`parent_hash` ≠ parent `hash`) |
@@ -387,7 +404,7 @@ flowchart LR
 | 단계 | 할 일 | 끝난 기준 |
 | :---: | :--- | :--- |
 | 1 | **인프라**: `docker-compose.yml`에 PostgreSQL 16 · Qdrant 추가, `.env`에 접속 정보. 스키마는 SQL 마이그레이션 파일(`db/migrations/0001_init.sql`) | `docker compose up` 후 마이그레이션 적용 |
-| 2 | **입력 읽기 · 관문**: `ingest/reader.py`, `ingest/gate.py`. 산출물을 pydantic 모델로 읽고 stale · 승인 여부를 계산 (전처리 코드 import 없음) | 로컬 2건을 읽고 관문 결과 출력 |
+| 2 | **입력 읽기 · 관문**: `ingest/reader.py`, `ingest/gate.py`. 산출물을 `schema_version`별 pydantic 모델로 읽고 stale · 승인 여부를 계산 (전처리 코드 import 없음) | 로컬 2건을 읽고 관문 결과 출력 |
 | 3 | **PostgreSQL 적재**: `ingest/load.py`. CLI `uv run python -m ingest load --src ../kicox_preprocess_poc/data/docs [--doc ID] [--dry-run]`. PDF · 쪽 이미지는 `storage/docs/{doc_id}/`로 복사 | 2건 적재, 같은 입력으로 다시 실행해 변경 0건 |
 | 4 | **임베딩 · sparse 모듈**: `embed(texts)`, `sparse(texts)` (설계 노트 §5.4-1). sparse는 원 프로젝트 `sparse.py`와 같은 입력에 같은 결과를 내는지 비교 | 단위 테스트 |
 | 5 | **동기화**: `python -m ingest sync`. 컬렉션 생성 · 별칭, `indexed_hash` 비교, 현행 판 전환, §7.5 점검 | 2건 색인, 재청킹 1건으로 바뀐 child만 다시 임베딩되는지 확인 |
@@ -421,3 +438,4 @@ flowchart LR
 | 2026-10-28 | 최초 작성: 전처리 산출물 형식 조사, PostgreSQL 스키마 · Qdrant 컬렉션 · 포인트 · payload · 동기화 · 적재 절차 · 구현 계획 |
 | 2026-10-28 | 저장 범위 축소: 질의 처리와 재색인에 쓰는 것만 PostgreSQL에 저장. 테이블 12개 → 5개(`documents` · `sections` · `chunks` · `tools` · `document_tools`). 규정 테이블은 `regulation_key` 열로, 색인 장부는 `indexed_hash` 열로 대체. 쪽 · 검증 · 카테고리 · 실행 기록 테이블과 진단용 열 제외. 관문에 걸린 판은 적재하지 않고, 도구는 승인된 것만 적재. payload에서 쪽번호 · 수치 플래그 · 카테고리 제외 |
 | 2026-10-28 | 계층정보 요구사항 반영: child dense는 `계층정보 + 원문`, sparse는 원문만. payload에 child `text` · `dense_text` 추가(PostgreSQL 재확인은 유지). parent `covers` 첫 문장은 기본 입력에서 빼고 평가로 결정. 입력 해시는 dense · sparse 입력을 함께, 리랭크 입력은 `dense_text`, child `avgdl`은 원문 기준. 열린 질문 8 · 9 추가 |
+| 2026-10-28 | 산출물 형식 버전(§2.3) 추가: `meta.json`의 정수 `schema_version`, 없으면 1(`c97fd03` 형식). 로더가 읽는 필드의 이름 · 삭제 · 의미가 바뀔 때만 올리고, 지원하지 않는 버전은 관문에서 탈락(§7.1). 로더를 `kicox_poc`에 두는 근거로 설계 노트 §5.5 연결 |
