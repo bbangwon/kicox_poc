@@ -1,6 +1,6 @@
-# DGX PoC - LLM 서버 연동 및 응용 프로젝트
+# KICOX 내부규정 RAG
 
-로컬 인프라(DGX)에 호스팅된 Ollama 기반 LLM 서버와 연동하여 LLM 응용 소프트웨어를 개발하고 검증하는 PoC 프로젝트입니다.
+KICOX 내부규정을 PostgreSQL · Qdrant에 적재하고(`ingest`), 적재된 규정으로 검색 · 답변하는 RAG 챗봇(`backend` · `web`)을 개발하고 검증하는 PoC입니다. 규정 전처리(청킹 · 요약)는 [kicox_preprocess_poc](../kicox_preprocess_poc)에서 하고, 그 JSON 산출물을 받아 적재합니다. LLM · 임베딩은 로컬 인프라(DGX)의 서버를 씁니다.
 
 ## 문서 안내
 

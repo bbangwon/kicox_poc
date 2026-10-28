@@ -1,5 +1,5 @@
 [project]
-name = "dgx-poc"
+name = "kicox-regulation-rag"
 version = "0.1.0"
 description = "KICOX 내부규정 RAG Q&A PoC (적재 · 검색 · LangGraph)"
 readme = "README.md"
