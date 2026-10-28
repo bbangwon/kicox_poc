@@ -14,3 +14,6 @@ wheels/
 .env
 .env.*
 !.env.example
+
+# 적재한 원본 PDF · 쪽 이미지 (ingest)
+storage/

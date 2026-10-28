@@ -167,13 +167,13 @@ LLM 선택 (카테고리 목록 + 후보)
 - **컬렉션 2개**: `doc_catalog`(문서 선택용), `chunks`(청크 검색용). `chunks`에는 child 포인트와 parent 요약 포인트를 함께 넣고 payload `type`(`child`/`parent`)으로 구분합니다.
 - **문서 하나에 포인트 여러 개**: `doc_catalog`에는 `summary` 포인트 1개 + 예상 질문마다 포인트 1개를 넣고, 검색 시 `doc_id`로 그룹화(Qdrant group 조회)해서 문서 단위로 후보를 뽑습니다. 질문형 사용자 질의가 예상 질문과 가장 잘 맞기 때문에 재현율이 오릅니다.
 - **동기화**: PostgreSQL 행마다 `content_hash`를 두고, 바뀐 행만 다시 임베딩해서 Qdrant에 upsert합니다. Qdrant 포인트 ID는 PostgreSQL의 청크·문서 ID에서 결정적으로 만듭니다 (예: UUIDv5). 문서가 폐지되면 해당 `doc_id` 포인트를 삭제합니다.
-- **한국어 키워드 검색 (확정)**: Kiwi 형태소 분석 + 해시 기반 sparse 인덱스로 BM25를 만들어 Qdrant sparse 벡터에 넣습니다. 일반 BM25 토크나이저는 조사·어미를 분리하지 못해 "출장비를"과 "출장비"가 다른 단어가 되기 때문입니다.
-  - **해시 함수**: 프로세스마다 값이 바뀌지 않는 안정 해시(예: mmh3, xxhash)를 씁니다. Python 내장 `hash()`는 실행할 때마다 값이 달라져(`PYTHONHASHSEED`) 색인과 질의의 인덱스가 어긋납니다. Qdrant sparse 인덱스가 uint32이므로 32비트 해시를 쓰면 충돌은 무시할 수준입니다
+- **한국어 키워드 검색 (확정, 2026-10-28 개정)**: 원 프로젝트 방식(낱말 + 한글 낱말 안 2-gram, CRC32)으로 BM25를 만들어 Qdrant sparse 벡터에 넣습니다. 일반 BM25 토크나이저는 조사·어미를 분리하지 못해 "출장비를"과 "출장비"가 다른 단어가 되는데, 2-gram은 두 낱말이 `출장`·`장비`를 공유해 이를 어느 정도 덮고 의존성이 없어 원 프로젝트 공통 부품으로 옮기기 쉽습니다. Kiwi 형태소 분석은 평가에서 비교합니다. 구현은 `ingest/sparse.py`, 규칙은 [DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §9.
+  - **해시 함수**: 프로세스마다 값이 바뀌지 않는 안정 해시(CRC32)를 씁니다. Python 내장 `hash()`는 실행할 때마다 값이 달라져(`PYTHONHASHSEED`) 색인과 질의의 인덱스가 어긋납니다. Qdrant sparse 인덱스가 uint32이므로 32비트 해시를 쓰면 충돌은 무시할 수준입니다
   - **가중치**: 문서 쪽에는 BM25의 TF 포화·문서 길이 보정(k1, b)을 적용한 값을 넣고, IDF는 Qdrant의 IDF modifier에 맡깁니다. 질의 쪽은 토큰별 가중치 1로 넣습니다
-  - **토큰화 일관성**: 색인과 질의에 같은 Kiwi 버전·옵션·품사 필터(예: 일반·고유명사, 동사·형용사 어근, 외국어, 숫자)를 씁니다. 규정 용어(예: 자가용 운임, 시외당일귀임)는 사용자 사전에 등록합니다. 토크나이저 설정이 바뀌면 sparse 인덱스 전체를 다시 만듭니다
+  - **토큰화 일관성**: 색인과 질의에 같은 `sparse.tokens()`를 씁니다. 토큰 규칙·불용어·`avgdl`이 바뀌면 sparse 인덱스 전체를 다시 만듭니다. (Kiwi를 쓰게 되면 같은 Kiwi 버전·옵션·품사 필터를 쓰고 규정 용어를 사용자 사전에 등록합니다)
   - `dragonkue/bge-m3-ko`는 dense 전용입니다. 로컬 캐시에 BGE-M3 원본에 있는 `sparse_linear.pt`·`colbert_linear.pt`가 없으므로 모델 자체의 sparse 출력은 쓸 수 없습니다
 - **결합**: dense와 sparse 결과를 Qdrant Query API의 RRF로 합칩니다.
-- **임베딩 서빙**: PoC에서는 로컬에 받아 둔 `dragonkue/bge-m3-ko`(Hugging Face 캐시)를 sentence-transformers로 직접 불러 씁니다. DGX로 옮길지는 미정이며, 옮길 때는 LLM 서버의 동시 4요청 슬롯을 쓰지 않도록 별도 프로세스(vLLM embed 모드 또는 TEI)로 띄웁니다. 호출부는 `embed(texts)` 인터페이스로 감싸 두어 위치가 바뀌어도 코드는 그대로 둡니다
+- **임베딩 서빙 (2026-10-28 개정)**: AI 서버의 vLLM `bge-m3-ko`(OpenAI 호환 `/v1/embeddings`, `EMBED_BASE_URL`)를 씁니다. 호출부는 `get_embedder().embed(texts, kind)` 인터페이스(`ingest/embed.py`)로 감싸 두어 로컬 sentence-transformers 등으로 바꿔도 코드는 그대로 둡니다
 
 ### 5.3 PDF 청킹·요약 계층 (확정)
 
@@ -301,8 +301,8 @@ PostgreSQL 저장 ──▶ 동기화 작업 ──▶ Qdrant (doc_catalog: 문�
 
 ### 5.4 구현 순서
 
-1. **임베딩·sparse 모듈**: 로컬 `dragonkue/bge-m3-ko`로 `embed(texts)`, Kiwi + 안정 해시로 `sparse(texts)`를 만듭니다
-2. **PostgreSQL 스키마·Qdrant 컬렉션**: §5.2 역할 분담대로 만들고, 동기화 작업을 작성합니다. 기존 2종(교육훈련비, 여비)을 첫 데이터로 이관합니다
+1. **임베딩·sparse 모듈** (구현, `ingest/embed.py`·`ingest/sparse.py`): 원격 `bge-m3-ko`로 `embed(texts)`, 2-gram + CRC32로 `sparse(texts)`를 만듭니다
+2. **PostgreSQL 스키마·Qdrant 컬렉션** (구현, `ingest/`, [DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §10): §5.2 역할 분담대로 만들고, 동기화 작업을 작성합니다. 기존 2종(교육훈련비, 여비)을 첫 데이터로 이관합니다
 3. **청킹·요약 파이프라인**: §5.3.3 순서대로 PDF를 child/parent로 나누고, LLM이 parent 요약과 문서 요약(`summary`·`keywords`·`questions`·`not_for`) 초안을 만든 뒤, 수치가 들어간 청크와 요약을 사람이 검증합니다. 보유 PDF 2종으로 먼저 실측합니다(§5.3.4)
 4. **검색 도구**: `search(query, category?)`, `list_docs(category)`, `get_chunks(ids)`를 MCP 서버에 추가합니다
 5. **질의 분석 · router 노드**: `graph.py`에 planner 앞 노드로 추가하고(질의 분석 → router), 재작성 질의와 선택 결과를 state에 저장합니다
@@ -367,9 +367,9 @@ PDF → 파싱·청킹·요약·도구 → JSON  ──▶  ingest(적재·임�
 - [x] 구현 순서 (§5.4)
 - [x] 임베딩 모델 → `dragonkue/bge-m3-ko` (§5.1)
 - [x] DB 제품 → PostgreSQL(원본) + Qdrant(검색 인덱스) (§5.2)
-- [x] 키워드 검색 → Kiwi 형태소 분석 + 해시 기반 sparse 인덱스 (§5.2)
+- [x] 키워드 검색 → 원 프로젝트 2-gram + CRC32 sparse 인덱스, Kiwi는 평가에서 비교 (§5.2, 2026-10-28 개정)
 - [x] `dragonkue/bge-m3-ko`의 sparse 출력 → 없음 (dense 전용, §5.2)
-- [x] 임베딩 서빙(PoC) → 로컬 모델 사용 (§5.2)
+- [x] 임베딩 서빙(PoC) → AI 서버 vLLM `bge-m3-ko` (§5.2, 2026-10-28 개정)
 - [x] PDF 청킹 구조 → 문서 요약 → parent → child 3계층 (§5.3)
 - [x] parent 크기 → 기본 2~4K, 전처리 설정으로 상한 조정 (§5.3.1)
 - [x] 요청당 32K의 근거 → 서버 설정값. 모델은 128K 지원 (§5.3.1)
@@ -407,3 +407,4 @@ PDF → 파싱·청킹·요약·도구 → JSON  ──▶  ingest(적재·임�
 | 2026-10-28 | 계층정보 요구사항 반영: child는 dense에 `계층정보 + 원문`, BM25에 원문만 넣고(§5.3.2 규칙 3 개정), Qdrant payload에 child `text`·`dense_text`를 둠. parent 요약 한 줄은 평가로 결정 ([DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §6.2·§6.3·§11-8) |
 | 2026-10-28 | 질의 분석 단계 추가: router 앞 짧은 LLM 호출 1회로 범위 밖 판정 · 검색용 질의 재작성(이전 턴 맥락, 규정 용어, 복합 질문 나누기) · 카테고리 추정. 질의로 카테고리를 먼저 골라 걸러내는 대안은 오분류 복구 불가 · 질의만으로 분류 곤란 · 규모 · 분류안 부재로 택하지 않고 참고 추정(RRF 보강)으로만 씀 (§4.1, §4.5) |
 | 2026-10-28 | 프로젝트 구성 확정(§5.5): 전처리(`kicox_preprocess_poc`)와 적재·검색·에이전트(`kicox_poc`) 2개 저장소, 경계는 JSON 산출물. 색인·질의가 같은 `embed()`·`sparse()`를 써야 하고 스키마·컬렉션 운영이 검색과 맞물려 DB 경계 분리는 택하지 않음. 계약은 산출물 형식 버전(`schema_version`) + `verify.json` |
+| 2026-10-28 | 적재 구현([DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §10 1~5단계, `ingest/`): BM25 토큰화를 원 프로젝트 2-gram + CRC32로 확정(Kiwi는 평가에서 비교, §5.2 개정), 임베딩은 AI 서버 vLLM `bge-m3-ko` 사용(로컬 모델 대신). 로컬 검증은 공용 컨테이너(PostgreSQL DB `kicox`, Qdrant `reg_*` 컬렉션)에서 함 |
