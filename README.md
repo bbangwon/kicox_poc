@@ -17,22 +17,24 @@
   * 문서 → 청크 → 도구 → 멀티턴 역질문의 계층형 타게팅 구조, 위험과 보완
   * 라우팅 실패 대응 흐름(후보 선택 → 검색 대체 경로 → 참조문서 없음), 논의 변경 이력
 
-## Agent Orchestration Viewer (프로토타입)
+## 내부규정 Q&A 테스트 화면
 
-`seed32-think`(HyperCLOVAX-SEED-Think-32B, vLLM) 기반 에이전트의 오케스트레이션 흐름과 MCP 도구 호출을 실시간으로 시각화하는 웹 UI입니다.
+적재된 규정(PostgreSQL + Qdrant)으로 검색과 답변 생성을 시험하는 챗봇 화면입니다. 디자인은 원 프로젝트(kicox-poc) 국회대응 답변 작성 화면의 토큰 · 대화창 · 근거 카드를 따릅니다. 흐름은 [RAG_FLOW_OVERVIEW.md](docs/RAG_FLOW_OVERVIEW.md) §4입니다.
 
 ```
-React (Vite, :5173) ──SSE──▶ FastAPI (:8000) ──▶ LangGraph [planner → agent ⇄ tools]
-                                                     │             │
-                                     ChatVLLM(seed32-think)   langchain-mcp-adapters
-                                                                   ├─▶ FastMCP docs     (:8101) get_training_policy
-                                                                   └─▶ FastMCP training (:8102) calculate_training_credits
+React (Vite, :5173) ──SSE──▶ FastAPI (:8000) ──▶ LangGraph
+  analyze ─▶ route ─▶ plan ─▶ read ─▶ answer
+     │         │  ▲     │
+     └─────────┴──┼─────┴──▶ no_reference      (plan에서 근거 없음 → route 1회 재시도)
+                  │
+      backend/search.py ── Qdrant reg_catalog · reg_chunks (dense + BM25, 앱 RRF) · PostgreSQL 재확인 · 원문
 ```
 
 ### 실행
 
 ```bash
-# 프로젝트 루트에 worker-ai-endpoints.env (LLM_BASE_URL 등, 커밋 금지)를 둔다
+# 루트에 worker-ai-endpoints.env(LLM_BASE_URL · EMBED_BASE_URL)와 .env(KICOX_DATABASE_URL 등) — 둘 다 커밋 금지
+# 적재 · 색인이 먼저 되어 있어야 한다: uv run python -m ingest load && uv run python -m ingest sync
 uv sync
 (cd web && npm install)
 ./scripts/dev.sh        # → http://localhost:5173
@@ -42,20 +44,21 @@ uv sync
 
 | 경로 | 내용 |
 | :--- | :--- |
-| `mcp_servers/` | FastMCP 서버 2종: `docs`(규정 원문 조회), `training`(교육훈련 판정·계산). 범용 계산·문서검색·이메일 mock 도구는 규정 Q&A에서 도구 선택을 흐려 제거했다 |
-| `get_training_policy` / `calculate_training_credits` | 인사팀 개인교육훈련비 지원 기준 조회, 이수학점 계산. 판단에 필요한 정보가 없으면 `need_info`와 역질문을 반환하고, 에이전트가 사용자에게 되묻는다 (같은 `thread_id`로 멀티턴 이어짐) |
-| `backend/graph.py` | LangGraph 그래프. 각 노드가 `get_stream_writer()`로 시각화 이벤트를 발행 |
-| `backend/app.py` | `GET /api/graph` (그래프 구조·MCP 도구 목록), `POST /api/chat` (실행 이벤트 SSE) |
-| `web/` | 채팅 / React Flow 그래프 / 실행 타임라인 3분할 UI |
+| `backend/search.py` | `search_docs`(문서 후보) · `search_chunks`(절 · child 적중, kind별 top-k) · `list_sections` · `get_chunks`(앞뒤 이웃 포함). 임베딩 · BM25는 `ingest`와 같은 함수를 쓴다 |
+| `backend/graph.py` | 노드 6개. analyze · route · plan은 thinking off 짧은 JSON 호출, answer는 근거만으로 스트리밍 답변(문장 끝 `[n]` 인용) |
+| `backend/app.py` | `GET /api/info` (모델 · 적재 문서 · 임베딩 사용 여부), `POST /api/chat` (실행 이벤트 SSE, `thread_id`로 멀티턴) |
+| `web/` | ① 테스트 시나리오(`src/scenarios.ts`) · ② 대화 · ③ 근거 카드 / 처리 단계(검색 후보 · 순위 · LLM 판단) 3열 화면. 토큰 · 글꼴은 원 프로젝트에서 복사(`src/styles`, `src/fonts`) |
+
+문서별 계산 도구와 역질문은 승인된 도구가 생기면 plan 뒤에 붙입니다(설계 노트 §5.4-6~7).
 
 ### SSE 이벤트
 
-`run_start` · `node_start` / `node_end` · `plan` · `thinking` / `token` (스트리밍 델타) · `llm_end` (도구 호출 결정, 토큰 수, tok/s) · `tool_call` / `tool_result` (MCP 서버명, 인자, 결과, 소요 시간) · `error` · `run_end`
+`run_start` · `node_start` / `node_end` · `analysis`(범위 밖 판정, 재작성 질의) · `doc_candidates`(문서 후보, 신호별 순위, RRF 점수) · `route`(선택 문서, 이유) · `chunk_hits`(절 적중) · `plan`(읽을 child, 이유) · `evidence`(근거 원문, 번호) · `thinking` / `token` (스트리밍 델타) · `llm_end` (토큰 수, tok/s) · `llm_retry` · `no_reference` · `error` · `run_end`
 
 ### 주의사항
 
-* `langchain-mcp-adapters`가 `mcp<2`를 요구하므로 `fastmcp`는 3.x로 고정되어 있습니다 (fastmcp 4.x는 `mcp>=2`).
 * LLM은 OpenAI 호환 vLLM 서버를 사용합니다. 서버 주소는 인증 없는 접근권이라 코드에 두지 않고, `backend/config.py`가 루트의 `worker-ai-endpoints.env`(`.gitignore` 대상)에서 읽습니다. 환경변수가 있으면 환경변수가 우선합니다.
-* `ChatOpenAI`는 vLLM의 `reasoning_content`(Thinking)를 버리므로 `backend/llm.py`의 `ChatVLLM`이 이를 보존하고 다음 요청에 되돌려 보냅니다. Thinking on/off는 `chat_template_kwargs.thinking`으로 전달합니다.
-* 컨텍스트는 요청당 32,768토큰(입력+출력 합)이고, 서버 동시 처리는 4요청입니다.
-* 생성 상한을 둡니다(`LLM_MAX_TOKENS=4096`, planner는 `LLM_PLANNER_MAX_TOKENS=512`). planner는 JSON 모드(`response_format`)를 쓰지 않습니다. seed32-think가 JSON 모드에서 가끔 끝나지 않고 상한까지 생성하기 때문입니다.
+* `ChatOpenAI`는 vLLM의 `reasoning_content`(Thinking)를 버리므로 `backend/llm.py`의 `ChatVLLM`이 이를 보존합니다. Thinking on/off는 `chat_template_kwargs.thinking`으로 전달하며, 화면의 토글은 answer 노드에만 적용됩니다.
+* 컨텍스트는 요청당 32,768토큰(입력+출력 합)이고, 서버 동시 처리는 4요청입니다. planner는 선택 문서의 목차와 child 머리말 전체를 받으므로 문서가 커지면 이 한도를 다시 봐야 합니다.
+* 생성 상한을 둡니다(`LLM_MAX_TOKENS=4096`, 분석 · 선택 호출은 `LLM_PLANNER_MAX_TOKENS=512`). JSON 모드(`response_format`)를 쓰지 않습니다. seed32-think가 JSON 모드에서 가끔 끝나지 않고 상한까지 생성하기 때문입니다.
+* 기존 교육훈련비 MCP 서버(`mcp_servers/`)와 오케스트레이션 뷰어는 이 화면으로 대체하며 제거했습니다(git 기록에 남음).

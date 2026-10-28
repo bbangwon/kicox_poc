@@ -304,8 +304,8 @@ PostgreSQL 저장 ──▶ 동기화 작업 ──▶ Qdrant (doc_catalog: 문�
 1. **임베딩·sparse 모듈** (구현, `ingest/embed.py`·`ingest/sparse.py`): 원격 `bge-m3-ko`로 `embed(texts)`, 2-gram + CRC32로 `sparse(texts)`를 만듭니다
 2. **PostgreSQL 스키마·Qdrant 컬렉션** (구현, `ingest/`, [DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §10): §5.2 역할 분담대로 만들고, 동기화 작업을 작성합니다. 기존 2종(교육훈련비, 여비)을 첫 데이터로 이관합니다
 3. **청킹·요약 파이프라인**: §5.3.3 순서대로 PDF를 child/parent로 나누고, LLM이 parent 요약과 문서 요약(`summary`·`keywords`·`questions`·`not_for`) 초안을 만든 뒤, 수치가 들어간 청크와 요약을 사람이 검증합니다. 보유 PDF 2종으로 먼저 실측합니다(§5.3.4)
-4. **검색 도구**: `search(query, category?)`, `list_docs(category)`, `get_chunks(ids)`를 MCP 서버에 추가합니다
-5. **질의 분석 · router 노드**: `graph.py`에 planner 앞 노드로 추가하고(질의 분석 → router), 재작성 질의와 선택 결과를 state에 저장합니다
+4. **검색 도구** (구현, `backend/search.py`): `search_docs(queries)` · `search_chunks(query, doc_ids)` · `list_sections(doc_ids)` · `get_chunks(ids, neighbors)`. MCP 서버가 아니라 **백엔드 안 함수**로 둡니다. router · planner는 도구 호출 에이전트가 아니라 코드가 검색을 부르는 노드라 MCP를 거칠 이유가 없습니다. 인터페이스는 고정해 두고 MCP 래핑은 필요할 때 합니다. `reg_chunks`는 kind별 top-k(child 20 · parent 요약 10)를 따로 뽑아 앱 RRF로 합칩니다(DB_LOADING_PLAN §11-10의 잠정안). 리랭커는 아직 쓰지 않습니다
+5. **질의 분석 · router 노드** (구현, `backend/graph.py`): `analyze → route → plan → read → answer`, `no_reference`. planner가 근거 없음을 내면 고른 문서를 빼고 route로 1회 돌아갑니다. 문서가 적어 planner에는 선택 문서의 목차(parent 요약 + child 머리말 전체, 검색 적중 ★)를 통째로 줍니다(§3-3). 테스트 화면(`web/`)이 기존 오케스트레이션 뷰어와 교육훈련비 MCP 서버를 대체합니다
 6. **문서별 도구 바인딩**: 선택된 문서의 도구만 agent에 바인딩합니다
 7. **역질문 상한·조건부 답변**: state에 역질문 횟수를 두고 프롬프트 규칙에 반영합니다
 8. **평가셋·회귀 측정**: §6 지표
@@ -408,3 +408,4 @@ PDF → 파싱·청킹·요약·도구 → JSON  ──▶  ingest(적재·임�
 | 2026-10-28 | 질의 분석 단계 추가: router 앞 짧은 LLM 호출 1회로 범위 밖 판정 · 검색용 질의 재작성(이전 턴 맥락, 규정 용어, 복합 질문 나누기) · 카테고리 추정. 질의로 카테고리를 먼저 골라 걸러내는 대안은 오분류 복구 불가 · 질의만으로 분류 곤란 · 규모 · 분류안 부재로 택하지 않고 참고 추정(RRF 보강)으로만 씀 (§4.1, §4.5) |
 | 2026-10-28 | 프로젝트 구성 확정(§5.5): 전처리(`kicox_preprocess_poc`)와 적재·검색·에이전트(`kicox_poc`) 2개 저장소, 경계는 JSON 산출물. 색인·질의가 같은 `embed()`·`sparse()`를 써야 하고 스키마·컬렉션 운영이 검색과 맞물려 DB 경계 분리는 택하지 않음. 계약은 산출물 형식 버전(`schema_version`) + `verify.json` |
 | 2026-10-28 | 적재 구현([DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §10 1~5단계, `ingest/`): BM25 토큰화를 원 프로젝트 2-gram + CRC32로 확정(Kiwi는 평가에서 비교, §5.2 개정), 임베딩은 AI 서버 vLLM `bge-m3-ko` 사용(로컬 모델 대신). 로컬 검증은 공용 컨테이너(PostgreSQL DB `kicox`, Qdrant `reg_*` 컬렉션)에서 함 |
+| 2026-10-28 | 질의 처리 구현(§5.4-4·5)과 테스트 화면: 검색은 MCP가 아닌 백엔드 내부 함수, `reg_chunks`는 kind별 top-k 후 RRF, 리랭커 없음. 승인된 문서별 도구가 0개여서 도구 경로 · 역질문(§5.4-6·7)은 보류. 참조문서 없음 안내에 쓸 문서별 담당 부서 정보가 DB에 없어 고정 문구로 안내 |

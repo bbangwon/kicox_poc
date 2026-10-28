@@ -1,7 +1,7 @@
-import type { AgentEvent, GraphInfo } from './types'
+import type { AgentEvent, Info } from './types'
 
-export async function fetchGraph(): Promise<GraphInfo> {
-  const res = await fetch('/api/graph')
+export async function fetchInfo(): Promise<Info> {
+  const res = await fetch('/api/info')
   if (!res.ok) throw new Error((await res.json().catch(() => null))?.detail ?? `HTTP ${res.status}`)
   return res.json()
 }

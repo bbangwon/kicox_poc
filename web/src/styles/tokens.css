@@ -1,0 +1,59 @@
+/* KICOX AI · 디자인 토큰 (프로토타입과 동일 값)
+   리브랜딩 지점은 이 파일의 "브랜드" 블록 한 곳뿐입니다(REBRAND 방법 1).
+   의미색·중립·타입·간격·radius·shadow는 킷 공유 자산 — 변경 금지. */
+
+@font-face{font-family:'Inter';font-weight:400;font-display:swap;src:url('../fonts/Inter-Regular.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:500;font-display:swap;src:url('../fonts/Inter-Medium.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:600;font-display:swap;src:url('../fonts/Inter-SemiBold.woff2') format('woff2')}
+@font-face{font-family:'Inter';font-weight:700;font-display:swap;src:url('../fonts/Inter-Bold.woff2') format('woff2')}
+@font-face{font-family:'Pretendard';font-weight:400;font-display:swap;src:url('../fonts/Pretendard-Regular.woff2') format('woff2')}
+@font-face{font-family:'Pretendard';font-weight:500;font-display:swap;src:url('../fonts/Pretendard-Medium.woff2') format('woff2')}
+@font-face{font-family:'Pretendard';font-weight:600;font-display:swap;src:url('../fonts/Pretendard-SemiBold.woff2') format('woff2')}
+@font-face{font-family:'Pretendard';font-weight:700;font-display:swap;src:url('../fonts/Pretendard-Bold.woff2') format('woff2')}
+
+:root{
+  /* 브랜드 (KICOX 블루) */
+  --dx-primary:#0070b0; --dx-primary-50:#e9f4fa; --dx-primary-100:#c9e4f1; --dx-primary-600:#005d93; --dx-primary-700:#00456e;
+  --dx-side-active-bg:#e9f4fa; --dx-side-active-fg:var(--dx-primary);
+  --dx-banner-bg:radial-gradient(at 50% -20%, #00304e, #0070b0);
+
+  /* 의미색 — 상태·등급·게이트 전용 (L-7) */
+  --dx-success:#22c55e; --dx-success-50:#e9faf0; --dx-success-fg:#15803d; --dx-success-bd:#bbe9cd;
+  --dx-caution:#eab308; --dx-caution-50:#fef9c3; --dx-caution-fg:#92700a; --dx-caution-bd:#f0d97a;
+  --dx-warning:#f59e0b; --dx-warning-50:#fef4e3; --dx-warning-fg:#9a6700; --dx-warning-bd:#f3d59a;
+  --dx-danger:#ef4444;  --dx-danger-50:#fde8e8;  --dx-danger-fg:#b42121;  --dx-danger-bd:#f4caca;
+  --dx-info:#3aa6ff;    --dx-info-50:#e3f2ff;    --dx-info-fg:#1668a8;    --dx-info-bd:#b9def8;
+
+  /* 중립 */
+  --dx-body-bg:#f3f3f9; --dx-surface:#ffffff; --dx-surface-alt:#f7f8fb; --dx-border:#eaecf3; --dx-border-strong:#d9dce6;
+  --dx-text:#1f243b; --dx-text-muted:#6c727f; --dx-text-subtle:#9ca0ad; --dx-on-primary:#ffffff; --dx-chart-grid:#eef0f5;
+  --dx-side-bg:#ffffff; --dx-side-border:#eaecf3; --dx-side-section:#9aa0ad;
+
+  /* 레이아웃 */
+  --dx-band-h:62px; --dx-band-pad-side:24px; --dx-band-pad-main:28px; --dx-control-h:36px;
+
+  /* radius · shadow */
+  --dx-radius-sm:4px; --dx-radius:10px; --dx-radius-btn:8px; --dx-radius-lg:12px; --dx-radius-pill:999px;
+  --dx-shadow-sm:0 1px 2px rgba(20,27,52,.04);
+  --dx-shadow:0 1px 3px rgba(20,27,52,.06), 0 1px 2px rgba(20,27,52,.04);
+  --dx-shadow-lg:0 12px 32px rgba(20,27,52,.10);
+
+  /* 타입 */
+  --dx-font-sans:"Inter","Pretendard",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --dx-font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Pretendard",monospace;
+  --dx-text-xs:11px; --dx-text-sm:12px; --dx-text-body:13px; --dx-text-md:14px; --dx-text-lg:16px; --dx-text-xl:20px; --dx-text-3xl:28px;
+
+  /* 시연 제어 전용 — 실서비스에서는 사용하지 않음 */
+  --dx-demo-bg:#0d1020; --dx-demo-fg:#aeb4c7; --dx-demo-bd:#2a2f45; --dx-demo-note:#6b7290;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html{font-family:var(--dx-font-sans);font-size:var(--dx-text-body);color:var(--dx-text);background:var(--dx-body-bg);-webkit-font-smoothing:antialiased}
+body{margin:0;line-height:1.5}
+:focus-visible{outline:2px solid var(--dx-primary);outline-offset:2px}
+
+@keyframes dxFade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes dxPop{from{opacity:0;transform:translateY(8px) scale(.994)}to{opacity:1;transform:none}}
+@keyframes dxToast{from{opacity:0;transform:translate(-50%,10px)}to{opacity:1;transform:translate(-50%,0)}}
+@keyframes dxSpin{to{transform:rotate(360deg)}}
+@keyframes dxPulse{0%,100%{opacity:1}50%{opacity:.45}}

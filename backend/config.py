@@ -25,8 +25,3 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
 # LLM 서버의 일시적 오류(5xx, 연결 끊김) 시 재시도 횟수와 기본 대기 시간(초, 시도마다 증가)
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 LLM_RETRY_DELAY = float(os.getenv("LLM_RETRY_DELAY", "2.0"))
-
-MCP_SERVERS = {
-    "docs": {"url": os.getenv("MCP_DOCS_URL", "http://127.0.0.1:8101/mcp"), "transport": "streamable_http"},
-    "training": {"url": os.getenv("MCP_TRAINING_URL", "http://127.0.0.1:8102/mcp"), "transport": "streamable_http"},
-}

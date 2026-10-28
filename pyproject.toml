@@ -1,14 +1,12 @@
 [project]
 name = "dgx-poc"
 version = "0.1.0"
-description = "qwen3.6 + LangGraph + FastMCP 오케스트레이션 시각화 PoC"
+description = "KICOX 내부규정 RAG Q&A PoC (적재 · 검색 · LangGraph)"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.143.0",
-    "fastmcp>=3.4,<4",
     "httpx>=0.28.1",
-    "langchain-mcp-adapters>=0.3.1",
     "langchain-openai>=1.7.1",
     "langgraph>=1.2.15",
     "psycopg[binary]>=3.2",

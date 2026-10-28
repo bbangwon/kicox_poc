@@ -1,7 +1,15 @@
-"""LangGraph 오케스트레이션: planner → agent ⇄ tools.
+"""LangGraph RAG 질의 처리: analyze → route → plan → read → answer (설계 노트 §4, RAG_FLOW_OVERVIEW §4).
 
-각 노드는 `get_stream_writer()`로 시각화용 커스텀 이벤트를 내보낸다.
-이벤트 스키마는 `type` 필드로 구분한다 (README 참고).
+- analyze: 범위 밖 판정 · 검색용 질의 재작성 (짧은 LLM 호출, thinking off)
+- route: 문서 카탈로그 하이브리드 검색 → router LLM이 문서 최대 3개 선택
+- plan: 선택 문서의 parent 요약 · 청크 적중 표시를 보고 planner LLM이 읽을 child 선택.
+  근거가 없으면 고른 문서를 빼고 route로 1회 되돌아간다 (§4.1 3-1)
+- read: child 원문 + 앞뒤 이웃 조회, 근거 번호 부여
+- answer: 근거만으로 스트리밍 답변, 문장마다 [n] 인용
+- no_reference: 참조문서 없음 안내
+
+문서별 도구 · 역질문은 승인된 도구가 생기면 plan 뒤에 붙인다.
+각 노드는 `get_stream_writer()`로 화면용 커스텀 이벤트를 내보낸다 (README 참고).
 """
 
 import asyncio
@@ -9,15 +17,14 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from functools import wraps
 from typing import Annotated, Literal
 
 import httpx
 import openai
-from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.tools import BaseTool
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -25,12 +32,25 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from backend import config as settings
+from backend import search
 from backend.llm import ChatVLLM
+
+MAX_DOCS = 3
+MAX_CHUNKS = 6
+MAX_REROUTES = 1
+HISTORY_MESSAGES = 6  # analyze · answer에 넘기는 이전 대화 (사용자 · 답변 합계)
 
 
 class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
-    plan: list[str]
+    queries: list[str]
+    selected_docs: list[str]
+    excluded_docs: list[str]
+    reroutes: int
+    chunk_ids: list[str]
+    evidence: list[dict]
+    no_reference: str | None  # 참조문서 없음 사유
+    out_of_scope: bool
 
 
 def _llm(thinking: bool) -> ChatVLLM:
@@ -118,95 +138,271 @@ async def _with_retry[T](node: str, call: Callable[[], Awaitable[T]]) -> T:
     raise AssertionError("unreachable")
 
 
-def _parse_steps(text: str) -> list[str]:
-    """{"steps": [...]} 응답에서 단계를 꺼낸다. 닫는 괄호가 없거나 잘린 응답이면 완성된 문자열만 쓴다."""
-    try:
-        return [str(s) for s in json.loads(text).get("steps", [])]
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    _, sep, rest = text.partition('"steps"')
-    return [json.loads(f'"{m}"') for m in re.findall(r'"((?:[^"\\]|\\.)*)"', rest)] if sep else []
+def _parse_json(text: str) -> dict:
+    """응답에서 첫 JSON 객체를 꺼낸다. 앞뒤 설명 · 코드 펜스가 붙어도 되고, 실패하면 빈 dict."""
+    start = text.find("{")
+    if start < 0:
+        return {}
+    for end in range(len(text), start, -1):
+        if text[end - 1] != "}":
+            continue
+        try:
+            value = json.loads(text[start:end])
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            continue
+    return {}
 
 
-PLANNER_PROMPT = """당신은 한국산업단지공단 내부규정 Q&A 에이전트의 플래너입니다.
-사용자의 마지막 메시지에 답하기 위한 실행 계획을 짧은 한국어 단계로 작성하세요.
-마지막 메시지가 직전 역질문에 대한 답변이면, 이전 대화의 원래 질문과 합쳐서 계획을 세웁니다.
-{scope}
-사용 가능한 도구:
-{tools}
+async def _ask_json(node: str, system: str, messages: list[AnyMessage]) -> tuple[dict, dict]:
+    """thinking off 짧은 호출. JSON 모드(response_format)는 쓰지 않는다 (seed32-think가 가끔 끝나지 않음)."""
+    llm = _llm(thinking=False).bind(max_tokens=settings.PLANNER_MAX_TOKENS)
+    started = time.perf_counter()
+    msg = await _with_retry(node, lambda: llm.ainvoke([SystemMessage(system), *messages]))
+    return _parse_json(_text(msg.content)), _llm_stats(msg, round((time.perf_counter() - started) * 1000))
+
+
+def _history(state: AgentState) -> list[AnyMessage]:
+    return [m for m in state["messages"] if isinstance(m, (HumanMessage, AIMessage))][-HISTORY_MESSAGES:]
+
+
+def _short_header(header: str) -> str:
+    """'문서 > 장 > 조' 머리말에서 문서명을 뺀 뒤쪽."""
+    parts = [p.strip() for p in header.split(">")]
+    return " > ".join(parts[1:]) if len(parts) > 1 else header
+
+
+# ── 프롬프트 ─────────────────────────────────────────────────────────
+
+ANALYZE_PROMPT = """당신은 한국산업단지공단 내부규정 Q&A의 질의 분석기입니다.
+대화의 마지막 사용자 메시지를 보고, 규정 검색이 필요한지 판단하고 검색용 질의를 만드세요.
 
 규칙:
-- 각 단계는 "도구명(조회 항목): 목적" 또는 "사용자에게 역질문: 무엇을" 또는 "직접 답변: 이유" 형식의 한 문장입니다.
-- 답변 범위 밖의 질문, 규정에 없는 내용(금액·한도·잔액 등), 인사말은 단계 하나("직접 답변: …")만 작성합니다.
-- 최대 4단계. 반드시 JSON으로만 응답: {{"steps": ["...", "..."]}}"""
+- out_of_scope=true: 인사말·잡담, 규정과 무관한 요청, 개인별 기록 조회(내 포인트 잔액, 내 이번 달 급여액처럼
+  회사 시스템의 개인 데이터를 봐야만 답할 수 있는 것).
+- 조건을 붙여 기준을 묻는 질문은 "제가", "저는"으로 시작해도 규정 질문입니다(out_of_scope=false).
+  예: "변호사 자격증 있으면 연봉 더 받아요?", "제가 육아휴직하면 보수 나와요?" → 규정의 지급 기준을 묻는 것.
+- 규정 내용(기준·절차·금액 기준표 등)을 묻는 질문은 어떤 규정인지 몰라도 out_of_scope=false입니다.
+- queries: 검색용 질의 1~3개. 이전 대화 맥락을 반영해 완결된 질의로 다시 씁니다("그럼 1년 넘으면요?" → "질병 휴직 1년 초과 보수").
+  구어는 규정 용어로 바꿉니다(월급 → 보수, 기름값 → 자동차 운임). 질문이 여러 개면 나눕니다.
+- 반드시 JSON으로만 응답: {"out_of_scope": false, "reason": "한 문장", "queries": ["..."]}"""
 
-SCOPE = """답변 범위: 개인교육훈련비 지원 기준(인사팀) — 지원대상·제외대상, 과세 여부, 교육신청 경로(MIS), 학점구분·직무구분, 이수학점.
-범위 밖: 여비(출장비·숙박비·자가용 운임·국외출장·부임여비 등)를 포함한 그 밖의 규정, 개인별 사용액·잔액 조회.
-담당 부서: 개인교육훈련비(지원 금액·한도·개인별 잔액 포함)는 인사팀, 여비는 상생복지팀."""
+ROUTE_PROMPT = """당신은 내부규정 Q&A의 라우터입니다. 검색 후보 문서 중에서 사용자 질문에 답할 근거가 있을 문서를 고르세요.
 
-AGENT_PROMPT = """당신은 한국산업단지공단 직원의 내부규정 질문에 답하는 한국어 상담 에이전트입니다.
-{scope}
+질문(검색용으로 다시 쓴 것): {queries}
 
-## 근거 원칙
-- 규정 원문(get_training_policy 결과)과 도구 결과에 있는 내용만 말하세요. 기억이나 일반 상식으로 규정을 보충하지 마세요.
-- 규정에 없는 내용(교육훈련비 지원 금액·한도·잔액 등)은 추측하지 말고 "규정에 명시되어 있지 않아 인사팀 확인이 필요합니다"라고 안내하세요.
-  사원번호 등을 물어 조회해 주겠다고 하지 마세요. 당신은 개인 데이터를 조회할 수 없습니다.
-- 범위 밖 질문은 도구를 호출하지 말고, 지금은 답변할 수 없다는 것과 위 담당 부서를 안내하세요. 금액을 추정하지 마세요.
-- 학점 등 수치는 직접 계산하지 말고 도구 결과의 값을 그대로 쓰세요.
+후보 문서:
+{candidates}
 
-## 지원범위 읽는 법
-- [지원대상]의 "직무 / 비과세", "공통 / 과세", "임금피크 / 과세"는 모두 **지원되는** 항목입니다. "과세"는 지원은 되지만 지원금이 과세된다는 뜻입니다.
-- 지원 불가는 [제외대상]에 해당하거나, 지원대상 항목의 단서(예: 취업·이직준비 목적 제외)에 걸리는 경우입니다.
-- 교육 내용이 현직무·IDP 희망직무와 관련 있는지에 따라 구분(직무/공통)과 과세가 달라지는데 대화에서 알 수 없으면, 추측하지 말고 업무 연관성을 되물으세요.
+규칙:
+- 질문에 직접 답할 수 있는 문서만 최대 {max_docs}개 고릅니다. 두 문서에 걸친 질문이면 둘 다 고릅니다.
+- "다루지 않음"에 해당하면 고르지 않습니다. 이름이 비슷하다는 이유만으로 고르지 않습니다.
+- 맞는 문서가 없으면 빈 목록을 냅니다. 억지로 고르지 마세요.
+- 반드시 JSON으로만 응답: {{"doc_ids": ["d1"], "reason": "한 문장"}}"""
 
-## 도구 사용
-- 지원 여부·과세 질문: get_training_policy(section="지원범위,제외대상")로 원문을 확인한 뒤 답하세요.
-- 신청 경로·학점구분·직무구분 질문: get_training_policy로 해당 항목(신청방법·학점구분·직무구분)을 확인한 뒤 답하세요.
-- 이수학점 질문: calculate_training_credits를 바로 호출하세요 (도구에 학점 기준이 들어 있으므로 규정 조회가 필요 없습니다).
-  사용자가 말하지 않은 인자는 추측하지 말고 생략하세요. 어학·엑셀·OA 교육이면 credit_category="공통"을 넘기세요.
+PLAN_PROMPT = """당신은 내부규정 Q&A의 planner입니다. 선택된 문서의 목차에서 질문에 답하는 데 읽어야 할 청크를 고르세요.
 
-## 역질문(멀티턴)
-- 도구가 status="need_info"를 반환하면 questions의 내용을 사용자에게 묻고 답변을 마치세요.
-- 질문은 한 번에 모아 짧은 번호 목록으로 하고, 가능하면 선택지를 함께 제시하세요.
-- 사용자가 답하면 이전 대화의 원래 질문과 합쳐서, 대화 전체에서 확인된 값을 모두 인자로 넘겨 다시 호출하세요. 이미 답한 것을 다시 묻지 마세요.
+질문(검색용으로 다시 쓴 것): {queries}
+
+목차 (★ = 검색 적중, 절 아래 c번호가 청크):
+{sections}
+
+규칙:
+- 답의 근거가 들어 있을 청크를 최대 {max_chunks}개 고릅니다. ★가 붙지 않은 청크도 고를 수 있습니다.
+- 각 절의 "다루지 않음"에 해당하는 내용이면 그 절에서 고르지 않습니다.
+- 목차 어디에도 질문에 답할 내용이 없으면 빈 목록을 냅니다.
+- 반드시 JSON으로만 응답: {{"chunks": ["c1", "c2"], "reason": "한 문장"}}"""
+
+ANSWER_PROMPT = """당신은 한국산업단지공단 직원의 내부규정 질문에 답하는 한국어 상담 에이전트입니다.
+
+## 근거
+{evidence}
+
+## 원칙
+- 위 근거에 있는 내용만 말하세요. 기억이나 일반 상식으로 규정을 보충하지 마세요.
+- 수치(금액·비율·일수·포인트)는 근거에 적힌 그대로 옮기세요. 근거에 없는 수치를 계산하거나 추정하지 마세요.
+- 근거로 답할 수 없는 부분은 "규정에서 확인되지 않습니다"라고 말하세요. 개인별 데이터는 조회할 수 없습니다.
 
 ## 답변 형식
-- 첫 문장에 결론을 쓰세요. (예: "지원됩니다. 다만 공통 교육이라 과세됩니다.", "1학점이 인정됩니다.")
-- 이어서 근거와 조건을 2~4개의 짧은 글머리표로 쓰세요. 결과에 conditions가 있으면 "~인 경우에 한해 인정"처럼 함께 안내하세요.
-- 규정을 근거로 답했으면 마지막 줄에 "근거: 개인교육훈련비 지원 기준 › <항목명>" 형식으로 표시하세요.
-  get_training_policy 결과 끝의 [근거 표기] 줄을 그대로 옮기고, 이수학점 계산이면 "개인교육훈련비 지원 기준 › 이수학점"을 씁니다.
-  역질문이나 범위 밖 안내에는 쓰지 않습니다.
-- 도구 이름, "규정을 조회하겠습니다" 같은 처리 과정, <cite> 같은 태그나 HTML은 쓰지 마세요.
-- "추가 질문이 있으면…", "다른 ~도 도와드릴 수 있습니다" 같은 맺음말로 끝내지 마세요. 근거 줄(또는 안내 문장)에서 답변을 끝냅니다.
-
-## 실행 계획 (참고용 — 위 규칙이 우선합니다)
-{plan}"""
+- 첫 문장에 결론을 쓰세요.
+- 이어서 조건·예외를 2~5개의 짧은 글머리표로 쓰세요.
+- 근거를 쓴 문장 끝에 [1], [2]처럼 근거 번호를 붙이세요. 여러 개면 [1][3]. 근거 목록에 없는 번호는 쓰지 마세요.
+- 처리 과정 설명, 태그·HTML, "추가 질문이 있으면…" 같은 맺음말은 쓰지 마세요."""
 
 
-def build_graph(tools: list[BaseTool], tool_servers: dict[str, str]):
-    tools_by_name = {t.name: t for t in tools}
-    tool_catalog = "\n".join(f"- {t.name}: {t.description.splitlines()[0]}" for t in tools)
+def _no_reference_text(out_of_scope: bool, reason: str, docs: list[dict]) -> str:
+    names = "\n".join(f"- {d['name']}" for d in docs) or "- (없음)"
+    head = (
+        "내부규정 내용에 대한 질문에 답변드리고 있습니다. 개인별 데이터는 조회할 수 없습니다."
+        if out_of_scope
+        else f"관련 규정을 찾지 못해 답변드리기 어렵습니다. ({reason})"
+    )
+    return (
+        f"{head}\n\n지금 답변할 수 있는 규정은 다음과 같습니다.\n{names}\n\n"
+        "개인별 데이터나 위 목록에 없는 규정은 담당 부서에 문의해 주세요."
+    )
 
-    @_traced("planner")
-    async def planner(state: AgentState, config: RunnableConfig):
-        # JSON 모드(response_format)는 쓰지 않는다. seed32-think에서 가끔 끝나지 않고 상한까지 생성한다.
-        # 계획은 짧으므로 상한을 작게 두고, 잘리거나 괄호가 빠져도 _parse_steps가 완성된 단계만 꺼낸다.
-        llm = _llm(thinking=False).bind(max_tokens=settings.PLANNER_MAX_TOKENS)
-        started = time.perf_counter()
-        msg = await _with_retry(
-            "planner",
-            lambda: llm.ainvoke([SystemMessage(PLANNER_PROMPT.format(scope=SCOPE, tools=tool_catalog)), *state["messages"]]),
+
+def build_graph():
+    @_traced("analyze")
+    async def analyze(state: AgentState, config: RunnableConfig):
+        parsed, stats = await _ask_json("analyze", ANALYZE_PROMPT, _history(state))
+        queries = [str(q).strip() for q in parsed.get("queries") or [] if str(q).strip()][:3]
+        last = _text(state["messages"][-1].content)
+        out = bool(parsed.get("out_of_scope"))
+        if not out and not queries:
+            queries = [last]  # 파싱 실패 시 원문으로 검색한다
+        reason = str(parsed.get("reason") or "")
+        _emit("analysis", out_of_scope=out, reason=reason, queries=queries, stats=stats)
+        # 턴마다 라우팅 상태를 새로 시작한다
+        return {
+            "queries": queries,
+            "selected_docs": [],
+            "excluded_docs": [],
+            "reroutes": 0,
+            "chunk_ids": [],
+            "evidence": [],
+            "no_reference": (reason or "규정 질문이 아닙니다") if out else None,
+            "out_of_scope": out,
+        }
+
+    @_traced("route")
+    async def route(state: AgentState, config: RunnableConfig):
+        candidates, ms = await search.search_docs(state["queries"])
+        excluded = set(state["excluded_docs"])
+        shown = [c for c in candidates if c.doc_id not in excluded]
+        _emit(
+            "doc_candidates",
+            ms=ms,
+            dense=search.dense_enabled(),
+            attempt=state["reroutes"] + 1,
+            items=[{**asdict(c), "excluded": c.doc_id in excluded} for c in candidates],
         )
-        steps = _parse_steps(_text(msg.content)) or ["직접 답변"]
-        _emit("plan", steps=steps, stats=_llm_stats(msg, round((time.perf_counter() - started) * 1000)))
-        return {"plan": steps}
+        if not shown:
+            return {"selected_docs": [], "no_reference": "검색 후보 문서가 없습니다"}
 
-    @_traced("agent")
-    async def agent(state: AgentState, config: RunnableConfig):
+        # 후보는 d1, d2… 짧은 별칭으로 보여 준다 (doc_id를 그대로 베끼다 틀리는 일을 막는다)
+        alias = {f"d{i}": c for i, c in enumerate(shown, 1)}
+        listing = "\n".join(
+            f"{a}. {c.name}\n   요약: {c.summary}\n   다루지 않음: {c.not_for or '-'}" for a, c in alias.items()
+        )
+        parsed, stats = await _ask_json(
+            "route",
+            ROUTE_PROMPT.format(queries=" / ".join(state["queries"]), candidates=listing, max_docs=MAX_DOCS),
+            _history(state)[-1:],
+        )
+        picked = [alias[a].doc_id for a in parsed.get("doc_ids") or [] if a in alias][:MAX_DOCS]
+        _emit(
+            "route",
+            doc_ids=picked,
+            names=[c.name for c in shown if c.doc_id in picked],
+            reason=str(parsed.get("reason") or ""),
+            stats=stats,
+        )
+        if not picked:
+            return {"selected_docs": [], "no_reference": "질문에 맞는 규정 문서가 없습니다"}
+        return {"selected_docs": picked}
+
+    @_traced("plan")
+    async def plan(state: AgentState, config: RunnableConfig):
+        docs = state["selected_docs"]
+        sections = await search.list_sections(docs)
+        hits_list = []
+        hit_ms = 0
+        for q in state["queries"]:
+            hits, ms = await search.search_chunks(q, docs)
+            hits_list.append(hits)
+            hit_ms += ms
+        hit_sections = {h.section_id for hits in hits_list for h in hits if h.summary_hit or h.child_ids}
+        hit_children = {c for hits in hits_list for h in hits for c in h.child_ids}
+        by_id = {s.section_id: s for s in sections}
+        _emit(
+            "chunk_hits",
+            ms=hit_ms,
+            sections=[
+                {
+                    "section_id": h.section_id,
+                    "doc_name": by_id[h.section_id].doc_name if h.section_id in by_id else "",
+                    "title": by_id[h.section_id].title if h.section_id in by_id else h.section_id,
+                    "score": h.score,
+                    "summary_hit": h.summary_hit,
+                    "child_hits": len(h.child_ids),
+                }
+                for h in hits_list[0][:10]
+            ],
+        )
+
+        # 청크 머리말 · 본문 앞부분을 목차에 붙여 보여 준다
+        chunks = {c.chunk_id: c for c in await search.get_chunks([c for s in sections for c in s.chunk_ids], 0)}
+        alias: dict[str, str] = {}
+        lines = []
+        doc_name = None
+        for s in sections:
+            if s.doc_name != doc_name:
+                doc_name = s.doc_name
+                lines.append(f"# {doc_name}")
+            mark = " ★" if s.section_id in hit_sections else ""
+            lines.append(f"## {s.title} (p.{s.page_start}-{s.page_end}){mark}")
+            lines.append(f"   다룸: {s.covers or '-'}")
+            if s.not_covers:
+                lines.append(f"   다루지 않음: {s.not_covers}")
+            for cid in s.chunk_ids:
+                c = chunks.get(cid)
+                if not c:
+                    continue
+                a = f"c{len(alias) + 1}"
+                alias[a] = cid
+                preview = re.sub(r"\s+", " ", c.body)[:50]
+                lines.append(f"   {a}{' ★' if cid in hit_children else ''} {_short_header(c.header)[-40:]} | {preview}")
+        parsed, stats = await _ask_json(
+            "plan",
+            PLAN_PROMPT.format(queries=" / ".join(state["queries"]), sections="\n".join(lines), max_chunks=MAX_CHUNKS),
+            _history(state)[-1:],
+        )
+        picked = [alias[a] for a in parsed.get("chunks") or [] if a in alias][:MAX_CHUNKS]
+        _emit(
+            "plan",
+            chunk_ids=picked,
+            labels=[_short_header(chunks[c].header) for c in picked],
+            reason=str(parsed.get("reason") or ""),
+            stats=stats,
+        )
+        if picked:
+            return {"chunk_ids": picked}
+        if state["reroutes"] < MAX_REROUTES:
+            return {"chunk_ids": [], "excluded_docs": [*state["excluded_docs"], *docs], "reroutes": state["reroutes"] + 1}
+        return {"chunk_ids": [], "no_reference": "선택한 문서에서 근거를 찾지 못했습니다"}
+
+    @_traced("read")
+    async def read(state: AgentState, config: RunnableConfig):
+        chunks = await search.get_chunks(state["chunk_ids"], neighbors=1)
+        evidence = [
+            {
+                "n": i,
+                "chunk_id": c.chunk_id,
+                "doc_name": c.doc_name,
+                "section_title": c.section_title,
+                "header": _short_header(c.header),
+                "body": c.body,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+                "has_numbers": c.has_numbers,
+                "verified": c.verified,
+                "neighbor": c.neighbor,
+            }
+            for i, c in enumerate(chunks, 1)
+        ]
+        _emit("evidence", items=evidence)
+        return {"evidence": evidence}
+
+    @_traced("answer")
+    async def answer(state: AgentState, config: RunnableConfig):
         thinking = config["configurable"].get("thinking", True)
-        llm = _llm(thinking).bind_tools(tools)
-        plan = "\n".join(f"{i}. {s}" for i, s in enumerate(state.get("plan", []), 1))
-        messages = [SystemMessage(AGENT_PROMPT.format(scope=SCOPE, plan=plan)), *state["messages"]]
+        llm = _llm(thinking)
+        blocks = "\n\n".join(
+            f"[{e['n']}] {e['doc_name']} > {e['header']} (p.{e['page_start']})\n{e['body']}" for e in state["evidence"]
+        )
+        messages = [SystemMessage(ANSWER_PROMPT.format(evidence=blocks)), *_history(state)]
 
         async def stream_once():
             # 재시도 시 이전 시도의 부분 출력은 버린다 (프론트엔드도 llm_retry 수신 시 초기화)
@@ -220,72 +416,47 @@ def build_graph(tools: list[BaseTool], tool_servers: dict[str, str]):
             return full
 
         started = time.perf_counter()
-        full = await _with_retry("agent", stream_once)
-
-        # additional_kwargs의 reasoning_content(Thinking)는 기록용으로 유지하지만 다음 호출에는 보내지 않는다.
-        # seed32-think(vLLM)는 이를 다시 보내면 Thinking이 content로 새어 나온다 (backend/llm.py 참고).
-        ai = AIMessage(
-            content=full.content,
-            additional_kwargs=full.additional_kwargs,
-            tool_calls=full.tool_calls,
-            response_metadata=full.response_metadata,
-            usage_metadata=full.usage_metadata,
-            id=full.id,
-        )
-        _emit(
-            "llm_end",
-            tool_calls=[{"id": tc["id"], "name": tc["name"]} for tc in ai.tool_calls],
-            stats=_llm_stats(ai, round((time.perf_counter() - started) * 1000)),
-        )
+        full = await _with_retry("answer", stream_once)
+        # reasoning_content(Thinking)는 다음 호출에 보내지 않는다 (backend/llm.py 참고)
+        ai = AIMessage(content=full.content, usage_metadata=full.usage_metadata, id=full.id)
+        _emit("llm_end", stats=_llm_stats(full, round((time.perf_counter() - started) * 1000)))
         return {"messages": [ai]}
 
-    @_traced("tools")
-    async def run_tools(state: AgentState, config: RunnableConfig):
-        results = []
-        for call in state["messages"][-1].tool_calls:
-            server = tool_servers.get(call["name"], "?")
-            _emit("tool_call", id=call["id"], name=call["name"], server=server, args=call["args"])
-            started = time.perf_counter()
-            tool = tools_by_name.get(call["name"])
-            if tool is None:
-                result = ToolMessage(f"알 수 없는 도구: {call['name']}", tool_call_id=call["id"], status="error")
-            else:
-                try:
-                    result = await tool.ainvoke({**call, "type": "tool_call"})
-                except Exception as e:  # MCP 전송 오류 등도 모델에 돌려줘 스스로 복구하게 한다
-                    result = ToolMessage(f"도구 실행 오류: {e}", tool_call_id=call["id"], status="error")
-            _emit(
-                "tool_result",
-                id=call["id"],
-                name=call["name"],
-                server=server,
-                content=_text(result.content),
-                error=result.status == "error",
-                ms=round((time.perf_counter() - started) * 1000),
-            )
-            results.append(result)
-        return {"messages": results}
+    @_traced("no_reference")
+    async def no_reference(state: AgentState, config: RunnableConfig):
+        reason = state.get("no_reference") or "근거 없음"
+        out = state.get("out_of_scope", False)
+        text = _no_reference_text(out, reason, await search.documents())
+        _emit("no_reference", reason=reason, out_of_scope=out)
+        _emit("token", delta=text)
+        return {"messages": [AIMessage(text)]}
 
-    def route(state: AgentState) -> Literal["tools", "__end__"]:
-        return "tools" if state["messages"][-1].tool_calls else END
+    def after_analyze(state: AgentState) -> Literal["route", "no_reference"]:
+        return "no_reference" if state.get("no_reference") else "route"
+
+    def after_route(state: AgentState) -> Literal["plan", "no_reference"]:
+        return "plan" if state["selected_docs"] else "no_reference"
+
+    def after_plan(state: AgentState) -> Literal["read", "route", "no_reference"]:
+        if state["chunk_ids"]:
+            return "read"
+        return "no_reference" if state.get("no_reference") else "route"
 
     g = StateGraph(AgentState)
-    g.add_node("planner", planner)
-    g.add_node("agent", agent)
-    g.add_node("tools", run_tools)
-    g.add_edge(START, "planner")
-    g.add_edge("planner", "agent")
-    g.add_conditional_edges("agent", route, ["tools", END])
-    g.add_edge("tools", "agent")
+    for name, fn in [
+        ("analyze", analyze),
+        ("route", route),
+        ("plan", plan),
+        ("read", read),
+        ("answer", answer),
+        ("no_reference", no_reference),
+    ]:
+        g.add_node(name, fn)
+    g.add_edge(START, "analyze")
+    g.add_conditional_edges("analyze", after_analyze, ["route", "no_reference"])
+    g.add_conditional_edges("route", after_route, ["plan", "no_reference"])
+    g.add_conditional_edges("plan", after_plan, ["read", "route", "no_reference"])
+    g.add_edge("read", "answer")
+    g.add_edge("answer", END)
+    g.add_edge("no_reference", END)
     return g.compile(checkpointer=InMemorySaver())
-
-
-async def load_mcp_tools() -> tuple[list[BaseTool], dict[str, str]]:
-    client = MultiServerMCPClient(settings.MCP_SERVERS)
-    tools: list[BaseTool] = []
-    servers: dict[str, str] = {}
-    for name in settings.MCP_SERVERS:
-        for tool in await client.get_tools(server_name=name):
-            tools.append(tool)
-            servers[tool.name] = name
-    return tools, servers
