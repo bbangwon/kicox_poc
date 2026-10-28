@@ -22,8 +22,8 @@ for _name in ("worker-ai-endpoints.env", ".env"):
 DATABASE_URL = os.getenv("KICOX_DATABASE_URL", "postgresql://localhost:5432/kicox")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 
-# 전처리 산출물 위치 (kicox_preprocess_poc/data/docs)와 원본 PDF · 쪽 이미지 복사 위치
-SRC_DIR = Path(os.getenv("INGEST_SRC", ROOT.parent / "kicox_preprocess_poc" / "data" / "docs"))
+# 전처리 산출물 위치 (kicox_regulation_prep/data/docs)와 원본 PDF · 쪽 이미지 복사 위치
+SRC_DIR = Path(os.getenv("INGEST_SRC", ROOT.parent / "kicox_regulation_prep" / "data" / "docs"))
 STORAGE_DIR = Path(os.getenv("STORAGE_DIR", ROOT / "storage" / "docs"))
 
 # 로더가 읽을 수 있는 산출물 형식 버전 (§2.3). meta.json에 없으면 1

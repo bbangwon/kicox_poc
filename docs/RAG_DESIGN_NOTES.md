@@ -154,7 +154,7 @@ LLM 선택 (카테고리 목록 + 후보)
 | Vector DB | Qdrant: 검색 전용 **인덱스**. 원본에서 다시 만들 수 있어야 합니다 |
 | 청킹 | 문서 요약 → parent(기본 2~4K) → child(512 상한) 3계층. 구조 기반 분할, 크기 상한은 전처리 설정으로 조정 (§5.3) |
 | 컨텍스트 기준 | 요청당 32K(현재 서버 설정). 원문은 적중 child + 앞뒤 이웃을 기본으로 넣습니다 |
-| 프로젝트 구성 | 전처리(`kicox_preprocess_poc`)와 적재·검색·에이전트(`kicox_regulation_rag`) 2개 저장소. 경계는 DB가 아니라 전처리 JSON 산출물 (§5.5) |
+| 프로젝트 구성 | 전처리(`kicox_regulation_prep`)와 적재·검색·에이전트(`kicox_regulation_rag`) 2개 저장소. 경계는 DB가 아니라 전처리 JSON 산출물 (§5.5) |
 
 ### 5.2 저장소 역할 분담
 
@@ -315,14 +315,14 @@ PostgreSQL 저장 ──▶ 동기화 작업 ──▶ Qdrant (doc_catalog: 문�
 전처리와 서비스를 저장소 2개로 나누고, **경계는 전처리 JSON 산출물**(`data/docs/{doc_id}/*.json`)에 둡니다. DB 적재(`ingest`)는 검색과 같은 `kicox_regulation_rag`에 둡니다.
 
 ```text
-[kicox_preprocess_poc]                     [kicox_poc]
+[kicox_regulation_prep]                    [kicox_regulation_rag]
 PDF → 파싱·청킹·요약·도구 → JSON  ──▶  ingest(적재·임베딩·동기화) → PostgreSQL/Qdrant ← 검색·에이전트
       + 검증 뷰어                           └──────── embed() · sparse() 공유 ────────┘
 ```
 
 | 저장소 | 맡는 것 | 모르는 것 |
 | :--- | :--- | :--- |
-| `kicox_preprocess_poc` | PDF 파싱 · 쪽 대조 · 구조 · 청킹 · 요약 · 도구 추출, 검증 뷰어, 도구 승인(`verify.json`) | DB · 임베딩 · 검색 |
+| `kicox_regulation_prep` | PDF 파싱 · 쪽 대조 · 구조 · 청킹 · 요약 · 도구 추출, 검증 뷰어, 도구 승인(`verify.json`) | DB · 임베딩 · 검색 |
 | `kicox_regulation_rag` | `ingest/`(관문 · PostgreSQL 적재 · 임베딩 · sparse · Qdrant 동기화 · 재색인 · 별칭 전환), DB 마이그레이션, 검색 도구, 에이전트 | 전처리 코드 (import하지 않음) |
 
 **적재를 전처리 쪽(DB 경계)이 아니라 서비스 쪽에 두는 이유**
@@ -409,3 +409,4 @@ PDF → 파싱·청킹·요약·도구 → JSON  ──▶  ingest(적재·임�
 | 2026-10-28 | 프로젝트 구성 확정(§5.5): 전처리(`kicox_preprocess_poc`)와 적재·검색·에이전트(`kicox_regulation_rag`) 2개 저장소, 경계는 JSON 산출물. 색인·질의가 같은 `embed()`·`sparse()`를 써야 하고 스키마·컬렉션 운영이 검색과 맞물려 DB 경계 분리는 택하지 않음. 계약은 산출물 형식 버전(`schema_version`) + `verify.json` |
 | 2026-10-28 | 적재 구현([DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §10 1~5단계, `ingest/`): BM25 토큰화를 원 프로젝트 2-gram + CRC32로 확정(Kiwi는 평가에서 비교, §5.2 개정), 임베딩은 AI 서버 vLLM `bge-m3-ko` 사용(로컬 모델 대신). 로컬 검증은 공용 컨테이너(PostgreSQL DB `kicox`, Qdrant `reg_*` 컬렉션)에서 함 |
 | 2026-10-28 | 질의 처리 구현(§5.4-4·5)과 테스트 화면: 검색은 MCP가 아닌 백엔드 내부 함수, `reg_chunks`는 kind별 top-k 후 RRF, 리랭커 없음. 승인된 문서별 도구가 0개여서 도구 경로 · 역질문(§5.4-6·7)은 보류. 참조문서 없음 안내에 쓸 문서별 담당 부서 정보가 DB에 없어 고정 문구로 안내 |
+| 2026-10-28 | 전처리 저장소 이름 변경 반영(`kicox_preprocess_poc` → `kicox_regulation_prep`, §5.5): 적재 기본 입력 경로 `../kicox_regulation_prep/data/docs`. Python 패키지 이름 `preprocess`는 그대로 |

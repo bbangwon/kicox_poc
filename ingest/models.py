@@ -1,4 +1,4 @@
-"""전처리 산출물 형식 버전 1 (kicox_preprocess_poc c97fd03)의 pydantic 모델.
+"""전처리 산출물 형식 버전 1 (kicox_regulation_prep c97fd03)의 pydantic 모델.
 
 로더가 읽는 필드만 정의한다. 필드 추가는 형식 버전을 올리지 않으므로(§2.3) 모르는 필드는 무시한다.
 """

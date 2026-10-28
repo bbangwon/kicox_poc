@@ -1,10 +1,10 @@
 # 전처리 결과 DB 적재 방안 (PostgreSQL + Qdrant)
 
-본 문서는 `kicox_preprocess_poc`가 만드는 전처리 결과(`data/docs/{doc_id}/*.json`)를 **PostgreSQL**과 **Qdrant**에 어떻게 넣을지 정리한 계획입니다. 임베딩 · BM25 · 컬렉션 운영은 원 프로젝트(국회대응) 정책을 따르고, 청킹 단위와 payload는 이 PoC의 3계층 구조에 맞게 새로 정합니다.
+본 문서는 `kicox_regulation_prep`가 만드는 전처리 결과(`data/docs/{doc_id}/*.json`)를 **PostgreSQL**과 **Qdrant**에 어떻게 넣을지 정리한 계획입니다. 임베딩 · BM25 · 컬렉션 운영은 원 프로젝트(국회대응) 정책을 따르고, 청킹 단위와 payload는 이 PoC의 3계층 구조에 맞게 새로 정합니다.
 
 - **기준일**: 2026-10-28
 - **상태**: §10 1~5단계 구현 (`ingest/`, `db/migrations/`). 로컬 2건으로 검증 (§10.1)
-- **입력**: `kicox_preprocess_poc` 커밋 `c97fd03`의 산출물 형식. 로컬에 끝까지 처리된 문서 2건(`46e9cf81e6af` 맞춤형복리후생제도 운영지침, `e1f17de5627c` 보수규정 시행세칙)을 직접 확인했고, ALIO 138건은 서버(192.168.0.48)에서 처리 중입니다
+- **입력**: `kicox_regulation_prep` 커밋 `c97fd03`의 산출물 형식. 로컬에 끝까지 처리된 문서 2건(`46e9cf81e6af` 맞춤형복리후생제도 운영지침, `e1f17de5627c` 보수규정 시행세칙)을 직접 확인했고, ALIO 138건은 서버(192.168.0.48)에서 처리 중입니다
 - **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.2 · §5.3 (저장소 역할 · 3계층), [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §2 · §7 (원 프로젝트 정책), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md) §6, [MCP_TOOL_DESIGN.md](MCP_TOOL_DESIGN.md)
 
 ---
@@ -405,7 +405,7 @@ flowchart LR
 | :---: | :--- | :--- |
 | 1 | **인프라**: 로컬 공용 컨테이너(`comwel-postgres-local` PG 18 · `comwel-qdrant-local` 1.15.4)에 DB `kicox`와 `reg_*` 컬렉션을 따로 둠(docker-compose는 만들지 않음). `.env`에 접속 정보. 스키마는 SQL 마이그레이션 파일(`db/migrations/0001_init.sql`) | `python -m ingest migrate`로 DB 생성 · 마이그레이션 적용 |
 | 2 | **입력 읽기 · 관문**: `ingest/reader.py`, `ingest/gate.py`. 산출물을 `schema_version`별 pydantic 모델로 읽고 stale · 승인 여부를 계산 (전처리 코드 import 없음) | 로컬 2건을 읽고 관문 결과 출력 |
-| 3 | **PostgreSQL 적재**: `ingest/load.py`. CLI `uv run python -m ingest load --src ../kicox_preprocess_poc/data/docs [--doc ID] [--dry-run]`. PDF · 쪽 이미지는 `storage/docs/{doc_id}/`로 복사 | 2건 적재, 같은 입력으로 다시 실행해 변경 0건 |
+| 3 | **PostgreSQL 적재**: `ingest/load.py`. CLI `uv run python -m ingest load --src ../kicox_regulation_prep/data/docs [--doc ID] [--dry-run]`. PDF · 쪽 이미지는 `storage/docs/{doc_id}/`로 복사 | 2건 적재, 같은 입력으로 다시 실행해 변경 0건 |
 | 4 | **임베딩 · sparse 모듈**: `embed(texts)`, `sparse(texts)` (설계 노트 §5.4-1). sparse는 원 프로젝트 `sparse.py`와 같은 입력에 같은 결과를 내는지 비교 | 단위 테스트 |
 | 5 | **동기화**: `python -m ingest sync`. 컬렉션 생성 · 별칭, `indexed_hash` 비교, 현행 판 전환, §7.5 점검 | 2건 색인, 재청킹 1건으로 바뀐 child만 다시 임베딩되는지 확인 |
 | 6 | **138건 적재**: 서버 결과를 받은 뒤(TODO.md 2단계) 일괄 적재 | 적재 · 관문 탈락 건수와 사유 보고 |
