@@ -17,6 +17,54 @@ KICOX 내부규정을 PostgreSQL · Qdrant에 적재하고(`ingest`), 적재된 
   * 문서 → 청크 → 도구 → 멀티턴 역질문의 계층형 타게팅 구조, 위험과 보완
   * 라우팅 실패 대응 흐름(후보 선택 → 검색 대체 경로 → 참조문서 없음), 논의 변경 이력
 
+## DB 적재
+
+전처리 산출물(`../kicox_regulation_prep/data/docs/{doc_id}/`)을 PostgreSQL에 넣고(`load`), PostgreSQL에서 Qdrant 포인트를 만들어 색인합니다(`sync`). 설계와 단계별 규칙은 [DB_LOADING_PLAN.md](docs/DB_LOADING_PLAN.md) §7입니다.
+
+### 준비
+
+* 로컬 공용 컨테이너 `comwel-postgres-local`(PostgreSQL) · `comwel-qdrant-local`(Qdrant)이 떠 있어야 합니다.
+* 루트에 `.env`(`.env.example` 복사, `KICOX_DATABASE_URL` · `QDRANT_URL`)와 `worker-ai-endpoints.env`(`EMBED_BASE_URL`)를 둡니다. 둘 다 커밋 금지. `EMBED_BASE_URL`이 없으면 dense 없이 BM25만 색인합니다.
+* 산출물 위치가 기본값과 다르면 `.env`의 `INGEST_SRC`나 `load --src`로 지정합니다.
+
+### 처음 적재할 때
+
+```bash
+uv sync
+uv run python -m ingest migrate            # DB kicox 생성 · 마이그레이션 적용
+uv run python -m ingest load --dry-run     # 관문 판정만. 통과 · 탈락 건수와 사유를 확인
+uv run python -m ingest load               # 통과한 판을 PostgreSQL에 적재, PDF · 쪽 이미지는 storage/docs/로 복사
+uv run python -m ingest sync               # 첫 실행은 avgdl 실측값을 출력하고 멈춤 (종료 코드 2)
+# 출력된 RAG_BM25_AVGDL_CATALOG · RAG_BM25_AVGDL_CHUNKS를 .env에 적은 뒤
+uv run python -m ingest sync               # Qdrant 색인 → 현행 판 전환 → 점검
+```
+
+`sync` 마지막 줄이 `점검: 정상`이면 끝입니다. 이후 `./scripts/dev.sh`로 테스트 화면을 띄웁니다.
+
+### 산출물이 바뀌었을 때
+
+전처리 뷰어에서 재청킹 · 요약 재생성 · 검증 · 도구 승인을 했으면 같은 두 명령을 다시 실행합니다.
+
+```bash
+uv run python -m ingest load [--doc ID ...]   # 바뀐 판만 다시 적재 (묶음 해시가 같으면 건너뜀)
+uv run python -m ingest sync [--doc ID ...]   # 입력이 바뀐 포인트만 다시 임베딩, 검증 표시만 바뀌면 payload만 갱신
+```
+
+* 화면의 "검증 전 수치" 표시는 `chunks.verified`를 읽습니다. `verify.json`을 고쳐도 `load`를 다시 돌리기 전에는 바뀌지 않습니다.
+* `--doc`을 빼면 전체가 대상입니다. 바뀌지 않은 판은 건너뛰므로 전체로 돌려도 됩니다.
+* `avgdl`을 바꾸면 BM25 값이 모두 달라지므로 전체 재색인이 필요합니다(§7.6).
+
+### 명령
+
+| 명령 | 하는 일 | 종료 코드 |
+| :--- | :--- | :--- |
+| `migrate` | DB 생성, `db/migrations/`의 SQL을 이름 순으로 한 번씩 적용 | 0 |
+| `load [--src DIR] [--doc ID ...] [--dry-run]` | 관문 검사 → 판 1건씩 트랜잭션으로 적재. `--dry-run`은 DB에 쓰지 않음 | 0 (탈락이 있어도 0, 출력의 탈락 사유를 확인) |
+| `sync [--doc ID ...]` | `LOADED` · `INDEXED` 판을 Qdrant에 동기화, 현행 판 전환, 점검 | 0 정상 · 1 실패 판이나 점검 문제 · 2 avgdl 미설정 |
+| `check` | PostgreSQL ↔ Qdrant 점검만 | 0 정상 · 1 문제 · 2 avgdl 미설정 |
+
+`sync`가 중간에 실패한 판은 `LOADED`로 남고, 다시 실행하면 색인되지 않은 행부터 이어서 합니다.
+
 ## 내부규정 Q&A 테스트 화면
 
 적재된 규정(PostgreSQL + Qdrant)으로 검색과 답변 생성을 시험하는 챗봇 화면입니다. 디자인은 원 프로젝트(kicox-poc) 국회대응 답변 작성 화면의 토큰 · 대화창 · 근거 카드를 따릅니다. 흐름은 [RAG_FLOW_OVERVIEW.md](docs/RAG_FLOW_OVERVIEW.md) §4입니다.
@@ -34,7 +82,7 @@ React (Vite, :5173) ──SSE──▶ FastAPI (:8000) ──▶ LangGraph
 
 ```bash
 # 루트에 worker-ai-endpoints.env(LLM_BASE_URL · EMBED_BASE_URL)와 .env(KICOX_DATABASE_URL 등) — 둘 다 커밋 금지
-# 적재 · 색인이 먼저 되어 있어야 한다: uv run python -m ingest load && uv run python -m ingest sync
+# 적재 · 색인이 먼저 되어 있어야 한다 (위 "DB 적재")
 uv sync
 (cd web && npm install)
 ./scripts/dev.sh        # → http://localhost:5173
