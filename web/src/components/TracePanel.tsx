@@ -1,11 +1,15 @@
 import type { ReactNode } from 'react'
+import { formatValue } from '../runReducer'
 import type { DocCandidate, LlmStats, Run } from '../types'
 
 const NODE_LABEL: Record<string, string> = {
+  resume: '역질문 답 확인',
   analyze: '질의 분석',
   route: '문서 선택',
   plan: '청크 선택',
   read: '원문 조회',
+  tool: '도구 계산',
+  ask: '역질문',
   answer: '답변 작성',
   no_reference: '참조문서 없음',
 }
@@ -67,6 +71,25 @@ export function TracePanel({ run }: { run: Run | null }) {
           </div>
         )}
       </Block>
+
+      {run.resume && (
+        <Block
+          title="역질문 답 확인"
+          meta={run.resume.answer ? <span className="tag" data-tone="primary">답</span> : <span className="tag">새 질문</span>}
+        >
+          {Object.keys(run.resume.values).length > 0 && (
+            <ul className="queries">
+              {Object.entries(run.resume.values).map(([k, v]) => (
+                <li key={k}>
+                  {k} = <b>{formatValue(v)}</b>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="reason">{run.resume.reason}</p>
+          <Stats stats={run.resume.stats} />
+        </Block>
+      )}
 
       {a && (
         <Block title="질의 분석" meta={a.outOfScope ? <span className="tag" data-tone="warning">범위 밖</span> : '검색 필요'}>
@@ -170,6 +193,47 @@ export function TracePanel({ run }: { run: Run | null }) {
           )}
         </Block>
       ))}
+
+      {(run.toolCalls || run.toolResults) && (
+        <Block title="도구 계산" meta={`승인 도구 ${run.tools.length}개`}>
+          {run.toolCalls && (
+            <p className="reason">
+              <b>도구 선택:</b> {run.toolCalls.calls.length ? run.toolCalls.reason : `호출 안 함 · ${run.toolCalls.reason}`}
+            </p>
+          )}
+          {run.toolResults && run.toolResults.items.length > 0 && (
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>도구 · 입력</th>
+                  <th className="num">결과</th>
+                </tr>
+              </thead>
+              <tbody>
+                {run.toolResults.items.map((t) => (
+                  <tr key={t.call}>
+                    <td>
+                      {t.name}
+                      <span className="sub">
+                        {Object.entries(t.args)
+                          .map(([k, v]) => `${k}=${formatValue(v)}`)
+                          .join(', ')}
+                      </span>
+                    </td>
+                    <td className="num">{t.error ? <span className="tag" data-tone="danger">{t.error}</span> : formatValue(t.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {run.toolResults && run.toolResults.missing.length > 0 && (
+            <div className="notice" data-tone="warning">
+              빈 값: {run.toolResults.missing.join(', ')} → {run.toolResults.pending ? '역질문' : '조건부 답변'}
+            </div>
+          )}
+          <Stats stats={run.toolCalls?.stats} />
+        </Block>
+      )}
 
       {(run.answerStats || run.thinking) && (
         <Block title="답변 생성" meta={run.thinkingEnabled ? 'Thinking on' : 'Thinking off'}>

@@ -1,6 +1,6 @@
 """규정 검색 (설계 노트 §4.2, DB_LOADING_PLAN §6.4).
 
-그래프 노드가 직접 부르는 함수 4개: search_docs · search_chunks · list_sections · get_chunks.
+그래프 노드가 직접 부르는 함수 5개: search_docs · search_chunks · list_sections · get_chunks · list_tools.
 색인과 같은 임베딩 · BM25 함수(ingest.embed · ingest.sparse)를 써야 하므로 ingest 모듈을 그대로 쓴다.
 Qdrant 결과는 그대로 믿지 않고 PostgreSQL에서 현행 판인지 다시 확인한다.
 """
@@ -240,6 +240,36 @@ def _get_chunks(ids: list[str], neighbors: int = 1) -> list[Chunk]:
     return [Chunk(str(r[0]), *r[1:]) for r in rows]
 
 
+# ── 계산 도구 ────────────────────────────────────────────────────────
+
+
+@dataclass
+class Tool:
+    tool_id: str
+    doc_id: str
+    doc_name: str
+    section_title: str
+    page_start: int | None
+    page_end: int | None
+    spec: dict  # 형식은 tools_exec 참고
+
+
+def _list_tools(doc_ids: list[str]) -> list[Tool]:
+    """선택 문서에 연결된 승인 도구 (document_tools N:M). 문서 순서 · 근거 절 순."""
+    if not doc_ids:
+        return []
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT t.id, dt.document_id, d.name, s.title, s.page_start, s.page_end, t.spec"
+            " FROM document_tools dt JOIN tools t ON t.id = dt.tool_id"
+            " JOIN documents d ON d.id = dt.document_id JOIN sections s ON s.id = t.section_id"
+            " WHERE dt.document_id = ANY(%s) AND d.is_current"
+            " ORDER BY array_position(%s, dt.document_id), s.ordinal, t.name",
+            (doc_ids, doc_ids),
+        ).fetchall()
+    return [Tool(str(r[0]), *r[1:]) for r in rows]
+
+
 # ── 비동기 진입점 (Qdrant · PostgreSQL · 임베딩 클라이언트가 동기라 스레드에서 돈다) ──
 
 
@@ -263,6 +293,10 @@ async def list_sections(doc_ids: list[str]) -> list[Section]:
 
 async def get_chunks(ids: list[str], neighbors: int = 1) -> list[Chunk]:
     return await asyncio.to_thread(_get_chunks, ids, neighbors)
+
+
+async def list_tools(doc_ids: list[str]) -> list[Tool]:
+    return await asyncio.to_thread(_list_tools, doc_ids)
 
 
 def _documents() -> list[dict]:

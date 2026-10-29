@@ -72,6 +72,7 @@ export function EvidenceList({ run, focus }: Props) {
                   </span>
                   <span className="tags">
                     {cited.has(e.n) ? <span className="tag" data-tone="primary">인용</span> : <span className="tag">참고</span>}
+                    {e.kind === 'tool' && <span className="tag">계산 도구</span>}
                     {e.neighbor && <span className="tag">앞뒤 이웃</span>}
                     {e.has_numbers && !e.verified && (
                       <span className="tag" data-tone="warning">
@@ -90,7 +91,7 @@ export function EvidenceList({ run, focus }: Props) {
               {open && (
                 <div className="evidence-quote">
                   <span className="evidence-quote-title">
-                    {e.section_title} · chunk {e.chunk_id.slice(0, 8)}
+                    {e.section_title} · {e.kind === 'tool' ? '승인된 계산 도구' : `chunk ${e.chunk_id.slice(0, 8)}`}
                   </span>
                   <span className="evidence-quote-text">{e.body}</span>
                 </div>

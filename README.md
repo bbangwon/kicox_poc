@@ -71,10 +71,11 @@ uv run python -m ingest sync [--doc ID ...]   # 입력이 바뀐 포인트만 �
 
 ```
 React (Vite, :5173) ──SSE──▶ FastAPI (:8000) ──▶ LangGraph
-  analyze ─▶ route ─▶ plan ─▶ read ─▶ answer
-     │         │  ▲     │
+  analyze ─▶ route ─▶ plan ─▶ read ─▶ (tool) ─▶ answer
+     │         │  ▲     │                 └──▶ ask (값이 비면 되묻고 턴 종료, 최대 2회)
      └─────────┴──┼─────┴──▶ no_reference      (plan에서 근거 없음 → route 1회 재시도)
                   │
+  다음 턴이 역질문의 답이면: resume ─▶ (계산) ─▶ answer | ask   (새 질문이면 resume ─▶ analyze)
       backend/search.py ── Qdrant reg_catalog · reg_chunks (dense + BM25, 앱 RRF) · PostgreSQL 재확인 · 원문
 ```
 
@@ -92,16 +93,20 @@ uv sync
 
 | 경로 | 내용 |
 | :--- | :--- |
-| `backend/search.py` | `search_docs`(문서 후보) · `search_chunks`(절 · child 적중, kind별 top-k) · `list_sections` · `get_chunks`(앞뒤 이웃 포함). 임베딩 · BM25는 `ingest`와 같은 함수를 쓴다 |
-| `backend/graph.py` | 노드 6개. analyze · route · plan은 thinking off 짧은 JSON 호출, answer는 근거만으로 스트리밍 답변(문장 끝 `[n]` 인용) |
+| `backend/search.py` | `search_docs`(문서 후보) · `search_chunks`(절 · child 적중, kind별 top-k) · `list_sections` · `get_chunks`(앞뒤 이웃 포함) · `list_tools`(선택 문서의 승인 도구). 임베딩 · BM25는 `ingest`와 같은 함수를 쓴다 |
+| `backend/graph.py` | 노드 9개. analyze · route · plan · tool · resume은 thinking off 짧은 JSON 호출, answer는 근거만으로 스트리밍 답변(문장 끝 `[n]` 인용) |
+| `backend/tools_exec.py` | 도구 spec 실행기. 전처리 저장소 `preprocess/tools_exec.py` 사본 (원본을 고치면 같이 맞춘다) |
 | `backend/app.py` | `GET /api/info` (모델 · 적재 문서 · 임베딩 사용 여부), `POST /api/chat` (실행 이벤트 SSE, `thread_id`로 멀티턴) |
 | `web/` | ① 테스트 시나리오(`src/scenarios.ts`) · ② 대화 · ③ 근거 카드 / 처리 단계(검색 후보 · 순위 · LLM 판단) 3열 화면. 토큰 · 글꼴은 원 프로젝트에서 복사(`src/styles`, `src/fonts`) |
 
-문서별 계산 도구와 역질문은 승인된 도구가 생기면 plan 뒤에 붙입니다(설계 노트 §5.4-6~7).
+문서별 계산 도구 (설계 노트 §5.4-6~7):
+- 선택 문서에 승인 도구(`document_tools`)가 있으면 read 뒤 tool 노드가 도구 · 입력값을 고르고 실행기가 계산합니다. LLM은 사용자가 말한 값과 근거 원문에서 바로 정해지는 값만 넣고, 모르는 값은 비워 둡니다. 앞 호출 결과를 `"#1"`로 다음 호출에 넘길 수 있습니다 (최대 3개)
+- 계산 결과는 근거 목록 끝에 번호를 붙여 넣고(`kind: "tool"`), 답변은 원문처럼 `[n]`으로 인용합니다
+- 값이 비면 ask가 되묻고 턴을 끝냅니다. 다음 턴은 resume이 그 메시지가 답인지 판정해, 답이면 다시 검색하지 않고 계산하고 새 질문이면 처음부터 처리합니다. 2번 되물어도 비거나 모른다고 하면 계산 없이 조건부로 답합니다
 
 ### SSE 이벤트
 
-`run_start` · `node_start` / `node_end` · `analysis`(범위 밖 판정, 재작성 질의) · `doc_candidates`(문서 후보, 신호별 순위, RRF 점수) · `route`(선택 문서, 이유) · `chunk_hits`(절 적중) · `plan`(읽을 child, 이유) · `evidence`(근거 원문, 번호) · `thinking` / `token` (스트리밍 델타) · `llm_end` (토큰 수, tok/s) · `llm_retry` · `no_reference` · `error` · `run_end`
+`run_start` · `node_start` / `node_end` · `analysis`(범위 밖 판정, 재작성 질의) · `doc_candidates`(문서 후보, 신호별 순위, RRF 점수) · `route`(선택 문서, 이유) · `chunk_hits`(절 적중) · `plan`(읽을 child, 이유) · `evidence`(근거 원문 · 계산 결과, 번호) · `tools`(선택 문서의 승인 도구) · `tool_calls`(고른 도구 · 입력값) · `tool_results`(계산 결과, 빈 값) · `ask`(역질문) · `resume`(역질문 답 판정) · `thinking` / `token` (스트리밍 델타) · `llm_end` (토큰 수, tok/s) · `llm_retry` · `no_reference` · `error` · `run_end`
 
 ### 주의사항
 

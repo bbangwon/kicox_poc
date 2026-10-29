@@ -11,6 +11,7 @@ export function newRun(id: string, prompt: string, thinkingEnabled: boolean): Ru
     routes: [],
     plans: [],
     evidence: [],
+    tools: [],
     thinking: '',
     answer: '',
     retries: [],
@@ -75,6 +76,21 @@ export function applyEvent(run: Run, e: AgentEvent): Run {
     case 'evidence':
       return { ...run, evidence: e.items }
 
+    case 'tools':
+      return { ...run, tools: e.items }
+
+    case 'tool_calls':
+      return { ...run, toolCalls: { calls: e.calls, reason: e.reason, stats: e.stats } }
+
+    case 'tool_results':
+      return { ...run, toolResults: { items: e.items, missing: e.missing, pending: e.pending } }
+
+    case 'ask':
+      return { ...run, ask: { missing: e.missing, asks: e.asks, max: e.max_asks } }
+
+    case 'resume':
+      return { ...run, resume: { answer: e.answer, values: e.values, reason: e.reason, stats: e.stats } }
+
     case 'no_reference':
       return { ...run, noReference: { reason: e.reason, outOfScope: e.out_of_scope } }
 
@@ -128,37 +144,65 @@ export function processSteps(run: Run): ProcessStep[] {
   const route = run.routes.at(-1)
   const plan = run.plans.at(-1)
   const cited = citedNumbers(run.answer)
-  const steps: ProcessStep[] = [
-    {
-      key: 'analyze',
-      title: '질의 분석',
-      detail: !a ? '' : a.outOfScope ? `범위 밖 · ${a.reason}` : a.queries.map((q) => `“${q}”`).join(' · '),
-      state: stateOf(run, 'analyze'),
-    },
-    {
-      key: 'route',
-      title: '문서 선택',
-      detail: !route
-        ? ''
-        : `후보 ${route.candidates.length}건 → ${route.names?.length ? route.names.join(', ') : route.docIds ? '해당 없음' : '선택 중'}` +
-          (run.routes.length > 1 ? ` (재검색 ${run.routes.length - 1}회)` : ''),
-      state: stateOf(run, 'route'),
-    },
-    {
-      key: 'plan',
-      title: '청크 선택',
-      detail: !plan?.chunkIds ? '' : plan.chunkIds.length ? `${plan.chunkIds.length}개 · ${plan.labels?.[0] ?? ''}` : '근거 없음',
-      state: stateOf(run, 'plan'),
-    },
-    {
-      key: 'read',
-      title: '원문 조회',
-      detail: run.evidence.length ? `근거 ${run.evidence.length}건 (이웃 포함)` : '',
-      state: stateOf(run, 'read'),
-    },
-  ]
+  const resumed = run.resume?.answer === true
+  const steps: ProcessStep[] = []
+  if (visited(run, 'resume')) {
+    steps.push({
+      key: 'resume',
+      title: '역질문 답 확인',
+      detail: !run.resume ? '' : resumed ? formatValues(run.resume.values) || '값 없음' : '새 질문 → 처음부터 검색',
+      state: stateOf(run, 'resume'),
+    })
+  }
+  // 역질문의 답이면 검색 단계를 다시 하지 않는다
+  if (!resumed) {
+    steps.push(
+      {
+        key: 'analyze',
+        title: '질의 분석',
+        detail: !a ? '' : a.outOfScope ? `범위 밖 · ${a.reason}` : a.queries.map((q) => `“${q}”`).join(' · '),
+        state: stateOf(run, 'analyze'),
+      },
+      {
+        key: 'route',
+        title: '문서 선택',
+        detail: !route
+          ? ''
+          : `후보 ${route.candidates.length}건 → ${route.names?.length ? route.names.join(', ') : route.docIds ? '해당 없음' : '선택 중'}` +
+            (run.routes.length > 1 ? ` (재검색 ${run.routes.length - 1}회)` : ''),
+        state: stateOf(run, 'route'),
+      },
+      {
+        key: 'plan',
+        title: '청크 선택',
+        detail: !plan?.chunkIds ? '' : plan.chunkIds.length ? `${plan.chunkIds.length}개 · ${plan.labels?.[0] ?? ''}` : '근거 없음',
+        state: stateOf(run, 'plan'),
+      },
+      {
+        key: 'read',
+        title: '원문 조회',
+        detail: run.evidence.length ? `근거 ${run.evidence.filter((e) => e.kind !== 'tool').length}건 (이웃 포함)` : '',
+        state: stateOf(run, 'read'),
+      },
+    )
+  }
+  if (visited(run, 'tool') || resumed) {
+    steps.push({
+      key: 'tool',
+      title: '도구 계산',
+      detail: toolDetail(run),
+      state: visited(run, 'tool') ? stateOf(run, 'tool') : stateOf(run, 'resume'),
+    })
+  }
   if (run.noReference) {
     steps.push({ key: 'no_reference', title: '참조문서 없음', detail: run.noReference.reason, state: stateOf(run, 'no_reference') })
+  } else if (run.ask) {
+    steps.push({
+      key: 'ask',
+      title: '역질문',
+      detail: `${run.ask.missing.join(', ')} (${run.ask.asks}/${run.ask.max}회)`,
+      state: stateOf(run, 'ask'),
+    })
   } else {
     steps.push({
       key: 'answer',
@@ -175,4 +219,22 @@ export function citedNumbers(text: string): number[] {
   const seen = new Set<number>()
   for (const m of text.matchAll(/\[(\d{1,2})\]/g)) seen.add(Number(m[1]))
   return [...seen]
+}
+
+export function formatValue(v: unknown): string {
+  return typeof v === 'number' ? v.toLocaleString() : v == null ? '?' : String(v)
+}
+
+function formatValues(values: Record<string, unknown>) {
+  return Object.entries(values)
+    .map(([k, v]) => `${k} = ${formatValue(v)}`)
+    .join(', ')
+}
+
+function toolDetail(run: Run) {
+  const r = run.toolResults
+  if (!r) return ''
+  const parts = r.items.map((t) => (t.error ? `${t.name} 실패` : `${t.name} = ${formatValue(t.value)}`))
+  if (r.missing.length) parts.push(`빈 값: ${r.missing.join(', ')}`)
+  return parts.join(' · ') || '호출 안 함'
 }

@@ -39,9 +39,32 @@ export interface Evidence {
   has_numbers: boolean
   verified: boolean
   neighbor: boolean
+  /** 계산 도구 결과면 'tool' (원문 청크는 없음) */
+  kind?: 'tool'
 }
 
-export type NodeName = 'analyze' | 'route' | 'plan' | 'read' | 'answer' | 'no_reference'
+export type NodeName = 'resume' | 'analyze' | 'route' | 'plan' | 'read' | 'tool' | 'ask' | 'answer' | 'no_reference'
+
+export interface ToolInfo {
+  name: string
+  description: string
+  doc_name: string
+}
+
+export interface ToolCall {
+  name: string
+  /** 입력값. null이면 사용자에게 되묻는다, "#n"은 n번째 호출 결과 */
+  args: Record<string, unknown>
+}
+
+export interface ToolResult {
+  call: number
+  name: string
+  args: Record<string, unknown>
+  value?: unknown
+  steps?: Record<string, unknown>
+  error?: string
+}
 
 export type AgentEvent =
   | { type: 'run_start'; ts: number; thread_id: string }
@@ -53,6 +76,11 @@ export type AgentEvent =
   | { type: 'chunk_hits'; ts: number; ms: number; sections: SectionHit[] }
   | { type: 'plan'; ts: number; chunk_ids: string[]; labels: string[]; reason: string; stats: LlmStats }
   | { type: 'evidence'; ts: number; items: Evidence[] }
+  | { type: 'tools'; ts: number; items: ToolInfo[] }
+  | { type: 'tool_calls'; ts: number; resumed: boolean; calls: ToolCall[]; reason: string; stats: LlmStats }
+  | { type: 'tool_results'; ts: number; items: ToolResult[]; missing: string[]; pending: boolean }
+  | { type: 'ask'; ts: number; missing: string[]; asks: number; max_asks: number }
+  | { type: 'resume'; ts: number; answer: boolean; values: Record<string, unknown>; reason: string; stats: LlmStats }
   | { type: 'no_reference'; ts: number; reason: string; out_of_scope: boolean }
   | { type: 'thinking'; ts: number; delta: string }
   | { type: 'token'; ts: number; delta: string }
@@ -133,6 +161,13 @@ export interface Run {
   routes: RouteAttempt[]
   plans: PlanAttempt[]
   evidence: Evidence[]
+  /** 선택 문서의 승인 계산 도구 */
+  tools: ToolInfo[]
+  /** 역질문의 답인지 판정 (대기 중인 계산이 있던 턴) */
+  resume?: { answer: boolean; values: Record<string, unknown>; reason: string; stats: LlmStats }
+  toolCalls?: { calls: ToolCall[]; reason: string; stats: LlmStats }
+  toolResults?: { items: ToolResult[]; missing: string[]; pending: boolean }
+  ask?: { missing: string[]; asks: number; max: number }
   noReference?: { reason: string; outOfScope: boolean }
   thinking: string
   answer: string
