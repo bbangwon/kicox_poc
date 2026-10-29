@@ -5,6 +5,7 @@
 - **기준일**: 2026-10-28
 - **상태**: §10 1~5단계 구현 (`ingest/`, `db/migrations/`). 로컬 2건으로 검증 (§10.1)
 - **입력**: `kicox_regulation_prep` 커밋 `c97fd03`의 산출물 형식. 로컬에 끝까지 처리된 문서 2건(`46e9cf81e6af` 맞춤형복리후생제도 운영지침, `e1f17de5627c` 보수규정 시행세칙)을 직접 확인했고, ALIO 138건은 서버(192.168.0.48)에서 처리 중입니다
+- **구현 기준 스펙**: [RDB_SPEC.md](RDB_SPEC.md) (PostgreSQL), [VDB_SPEC.md](VDB_SPEC.md) (Qdrant)
 - **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.2 · §5.3 (저장소 역할 · 3계층), [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §2 · §7 (원 프로젝트 정책), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md) §6, [MCP_TOOL_DESIGN.md](MCP_TOOL_DESIGN.md)
 
 ---
