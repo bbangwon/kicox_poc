@@ -4,22 +4,18 @@ KICOX 내부규정을 PostgreSQL · Qdrant에 적재하고(`ingest`), 적재된 
 
 ## 문서 안내
 
-* 📖 **[LLM 서버 사양 및 연동 가이드](docs/LLM_SERVER_SPEC.md)**:
-  * 서버 엔드포인트 및 접속 정보 (`http://192.168.0.58:11434`)
-  * 호스팅 모델 사양 비교 (`gpt-oss:latest`, `qwen3.6:35b`, `gemma4:31b`)
-  * 벤치마크 및 테스트 결과 분석
-  * Python (`openai` SDK, `httpx`, `LangChain`) 연동 예제 코드
-  * 개발 시 고려사항 및 베스트 프랙티스
-* 🧰 **[사내 규정 Q&A 에이전트 MCP 도구 설계](docs/MCP_TOOL_DESIGN.md)**:
-  * 개인교육훈련비·여비 규정 PDF에서 도출한 계산·판정·조회 도구 후보와 입출력 명세, 검증 예시
-  * 문서상 한계 및 담당 부서 확인 필요 사항
 * 🧭 **[RAG 챗봇 설계 아이디어 노트](docs/RAG_DESIGN_NOTES.md)**:
   * 문서 → 청크 → 도구 → 멀티턴 역질문의 계층형 타게팅 구조, 위험과 보완
   * 라우팅 실패 대응 흐름(후보 선택 → 검색 대체 경로 → 참조문서 없음), 논의 변경 이력
+* 🗺️ **[RAG 챗봇 흐름 한눈에 보기](docs/RAG_FLOW_OVERVIEW.md)**: 구현 기준 질의 처리 · 역질문 · 전처리 · 저장소 흐름도
+* 🗄️ **[DB 적재 방안](docs/DB_LOADING_PLAN.md)**: 전처리 산출물 → PostgreSQL · Qdrant 설계 근거와 구현 단계
+* 📐 **[RDB 스펙](docs/RDB_SPEC.md)** · **[VDB 스펙](docs/VDB_SPEC.md)**: 현재 구현 기준 테이블 · 컬렉션 명세
+* 📚 **[원 프로젝트 RAG · 임베딩 정책 참고](docs/ASSEMBLY_RAG_REFERENCE.md)**: bge-m3-ko · BM25(2-gram, CRC32) · 별칭 운영의 근거
+* 🗃️ 이전 단계 문서 (MCP 오케스트레이션 PoC 시기): [MCP 도구 설계](docs/MCP_TOOL_DESIGN.md) (규정 공백 목록 · 부록 A 기준 수치만 참조), [규정 지식 카드 · 목차 라우팅](docs/POLICY_KNOWLEDGE_INDEX.md)
 
 ## DB 적재
 
-전처리 산출물(`../kicox_regulation_prep/data/docs/{doc_id}/`)을 PostgreSQL에 넣고(`load`), PostgreSQL에서 Qdrant 포인트를 만들어 색인합니다(`sync`). 설계와 단계별 규칙은 [DB_LOADING_PLAN.md](docs/DB_LOADING_PLAN.md) §7입니다.
+전처리 산출물(`../kicox_regulation_prep/data/docs/{doc_id}/`)을 PostgreSQL에 넣고(`load`), PostgreSQL에서 Qdrant 포인트를 만들어 색인합니다(`sync`). 설계와 단계별 규칙은 [DB_LOADING_PLAN.md](docs/DB_LOADING_PLAN.md) §7, 구현 명세는 [RDB_SPEC.md](docs/RDB_SPEC.md) · [VDB_SPEC.md](docs/VDB_SPEC.md)입니다.
 
 ### 준비
 
@@ -52,7 +48,7 @@ uv run python -m ingest sync [--doc ID ...]   # 입력이 바뀐 포인트만 �
 
 * 화면의 "검증 전 수치" 표시는 `chunks.verified`를 읽습니다. `verify.json`을 고쳐도 `load`를 다시 돌리기 전에는 바뀌지 않습니다.
 * `--doc`을 빼면 전체가 대상입니다. 바뀌지 않은 판은 건너뛰므로 전체로 돌려도 됩니다.
-* `avgdl`을 바꾸면 BM25 값이 모두 달라지므로 전체 재색인이 필요합니다(§7.6).
+* `avgdl`을 바꾸면 BM25 값이 모두 달라지므로 `sync`가 전체를 다시 임베딩합니다([VDB_SPEC.md](docs/VDB_SPEC.md) §10).
 
 ### 명령
 

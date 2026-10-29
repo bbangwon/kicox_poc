@@ -152,7 +152,7 @@ HNSW · 양자화 · 샤드 · 복제는 Qdrant 기본값입니다.
 | IDF | 컬렉션의 `modifier = IDF`가 곱함 |
 | `avgdl` | 컬렉션별 고정값. `RAG_BM25_AVGDL_CATALOG` · `RAG_BM25_AVGDL_CHUNKS` (`.env`). 비어 있으면 `sync`가 실측값(`LOADED` · `INDEXED` 판의 포인트별 sparse 토큰 수 평균, child는 원문 기준)을 알려 주고 멈춤 |
 
-현재 `avgdl`은 로컬 2건 실측값(catalog 43.4 · chunks 110.2)인 임시값입니다. ALIO 138건을 적재하면 다시 재고 전체 재색인합니다.
+현재 `avgdl`은 ALIO 138건 실측값(catalog 41.2 · chunks 178.1)입니다. 로컬 2건 임시값(43.4 · 110.2)에서 바꾸며 `sync`로 전체를 다시 색인했습니다.
 
 ---
 
@@ -205,6 +205,7 @@ PostgreSQL 트랜잭션([RDB_SPEC.md](RDB_SPEC.md) §4)을 커밋한 뒤:
 - 임베딩이 없으면 `bm25` 신호만 씁니다.
 - `kind`별로 따로 뽑는 이유: 한 번에 검색하면 BM25 상위를 키워드 · 예상 질문이 붙은 parent 요약이 차지합니다(DB_LOADING_PLAN §11-10).
 - 리랭커(`bge-reranker-v2-m3-ko`, 입력 `dense_text`)는 아직 연결하지 않았습니다.
+- `search_chunks` 결과는 그 자체로 PostgreSQL 재확인을 하지 않고, `list_sections` · `get_chunks`(`d.is_current`)를 거쳐서만 씁니다.
 
 ---
 
@@ -222,15 +223,13 @@ PostgreSQL 쪽 불변식은 [RDB_SPEC.md](RDB_SPEC.md) §8.
 
 ---
 
-## 9. 현재 규모 (로컬, 2026-10-28)
+## 9. 현재 규모 (로컬, 2026-10-29)
 
-| 문서 | `reg_catalog` | `reg_chunks` |
-| :--- | :---: | :---: |
-| 맞춤형복리후생제도 운영지침 (`46e9cf81e6af`) | 9 | 33 |
-| 보수규정 시행세칙 (`e1f17de5627c`) | 9 | 106 |
-| 합계 | 18 | 139 |
-
-138건(평균 10쪽 가정) 적재 시 child 약 6천 · 포인트 약 7천 개로 예상합니다(DB_LOADING_PLAN §10).
+| 컬렉션 | 포인트 | 내역 |
+| :--- | ---: | :--- |
+| `reg_catalog` | 1,200 | 문서 요약 138 + 예상 질문 1,062 |
+| `reg_chunks` | 7,835 | parent 요약 1,263 + child 6,572 |
+| 합계 | 9,035 | 문서 판 138건, 별칭은 `*__bge-m3-ko__1024`를 가리킴 |
 
 ---
 
@@ -253,3 +252,4 @@ PostgreSQL 쪽 불변식은 [RDB_SPEC.md](RDB_SPEC.md) §8.
 | 날짜 | 내용 |
 | :--- | :--- |
 | 2026-10-29 | 최초 작성: `ingest/` · `backend/search.py` 구현 기준으로 컬렉션 · 벡터 · payload · 포인트 · 벡터 생성 · 동기화 · 검색 · 점검 정리 |
+| 2026-10-29 | 정합성 정리: 138건 실측 `avgdl`과 포인트 수로 갱신, `search_chunks` 재확인 경로 명시 |

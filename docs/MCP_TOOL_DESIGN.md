@@ -1,5 +1,7 @@
 # 사내 규정 Q&A 에이전트 MCP 도구 설계 (MCP Tool Design)
 
+> ⚠️ **이전 단계 문서 (MCP 오케스트레이션 PoC)**. `mcp_servers/`와 `planner → agent ⇄ tools` 구조는 제거됐습니다. 도구는 전처리 저장소가 문서별로 추출 · 승인한 `formula` / `table_lookup` spec으로 바뀌었고(실행기 `backend/tools_exec.py`), 역질문도 `need_info` 대신 tool 노드가 비워 둔 입력값을 ask 노드가 되묻습니다([RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.4-6~7). 지금 참조하는 부분은 **§5 규정 공백 목록**과 **부록 A 기준 수치**(파싱 정답 확인용)뿐입니다.
+
 본 문서는 `docs/`의 사내 규정 PDF 2종을 매뉴얼로 사용하는 한국어 Q&A 에이전트에서, 오케스트레이터(LangGraph `planner → agent ⇄ tools`)가 MCP로 호출할 도구를 정리한 문서입니다.
 
 - **도구 선정 기준**: 직원 문의가 잦을 것으로 보이는 질문을 우선합니다. 저빈도 질문은 별도 계산 도구 없이 규정 조회 도구로 대응합니다.

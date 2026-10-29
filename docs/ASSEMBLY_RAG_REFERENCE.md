@@ -4,7 +4,7 @@
 
 - **조사 기준**: `kicox-poc` 브랜치 `feature/regulation`(커밋 `9e35025`), 2026-10-28
 - **모델 값 출처**: `deploy/compose/dev/.env.example`. 개발기 · 운영 서버의 실제 `.env` 값은 확인하지 않았습니다
-- **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md), [LLM_SERVER_SPEC.md](LLM_SERVER_SPEC.md)
+- **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md)
 
 ---
 
@@ -211,6 +211,8 @@
 국회대응의 청킹 규칙은 공문 · 보고서 · 답변서에 맞춘 것이라 내부 규정(조 · 항 · 호 구조)에는 그대로 쓰지 않습니다. **임베딩 · BM25 생성 · 컬렉션 운영은 따르고, 청킹과 그에 묶인 값은 규정용으로 새로 정합니다.**
 
 ### 7.1 그대로 따를 것
+
+> 반영 현황(2026-10-29): 임베딩 · BM25 생성 · 별칭과 물리 이름 · 앱 RRF는 `ingest/`(`embed.py` · `sparse.py` · `sync.py`)와 `backend/search.py`에 반영했습니다. 리랭커는 아직 쓰지 않습니다([RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §7). BM25 `avgdl`은 700 대신 첫 `sync` 실측값을 `RAG_BM25_AVGDL_*`로 고정합니다([DB_LOADING_PLAN.md](DB_LOADING_PLAN.md) §7.6). 아래 체크 상자는 조사 당시 목록이라 따로 갱신하지 않습니다.
 
 **임베딩 · 리랭커**
 - [ ] 임베딩 모델 `bge-m3-ko`(1024, COSINE), 접두어 없음, OpenAI 호환 `/v1/embeddings`

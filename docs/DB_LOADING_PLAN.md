@@ -2,11 +2,12 @@
 
 본 문서는 `kicox_regulation_prep`가 만드는 전처리 결과(`data/docs/{doc_id}/*.json`)를 **PostgreSQL**과 **Qdrant**에 어떻게 넣을지 정리한 계획입니다. 임베딩 · BM25 · 컬렉션 운영은 원 프로젝트(국회대응) 정책을 따르고, 청킹 단위와 payload는 이 PoC의 3계층 구조에 맞게 새로 정합니다.
 
-- **기준일**: 2026-10-28
-- **상태**: §10 1~5단계 구현 (`ingest/`, `db/migrations/`). 로컬 2건으로 검증 (§10.1)
-- **입력**: `kicox_regulation_prep` 커밋 `c97fd03`의 산출물 형식. 로컬에 끝까지 처리된 문서 2건(`46e9cf81e6af` 맞춤형복리후생제도 운영지침, `e1f17de5627c` 보수규정 시행세칙)을 직접 확인했고, ALIO 138건은 서버(192.168.0.48)에서 처리 중입니다
+- **기준일**: 2026-10-28 (2026-10-29 구현 상태 반영)
+- **상태**: §10 1~6단계 구현 (`ingest/`, `db/migrations/`). 로컬 2건으로 검증(§10.1)한 뒤 ALIO 138건 적재 · 색인 완료(§10.2). 검색은 `backend/search.py`
+- **입력**: `kicox_regulation_prep` 커밋 `c97fd03`의 산출물 형식. 처음에는 로컬에 끝까지 처리된 문서 2건(`46e9cf81e6af` 맞춤형복리후생제도 운영지침, `e1f17de5627c` 보수규정 시행세칙)으로 형식을 확인했습니다
+- **구현 상태가 이 문서와 다르면 스펙 문서가 맞습니다.** 이 문서는 설계 근거와 대안을 남기는 용도입니다
 - **구현 기준 스펙**: [RDB_SPEC.md](RDB_SPEC.md) (PostgreSQL), [VDB_SPEC.md](VDB_SPEC.md) (Qdrant)
-- **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.2 · §5.3 (저장소 역할 · 3계층), [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §2 · §7 (원 프로젝트 정책), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md) §6, [MCP_TOOL_DESIGN.md](MCP_TOOL_DESIGN.md)
+- **관련 문서**: [RAG_DESIGN_NOTES.md](RAG_DESIGN_NOTES.md) §5.2 · §5.3 (저장소 역할 · 3계층), [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §2 · §7 (원 프로젝트 정책), [RAG_FLOW_OVERVIEW.md](RAG_FLOW_OVERVIEW.md) §6
 
 ---
 
@@ -61,7 +62,7 @@
 | `neighbors` | 앞뒤 searchable child ID | 저장하지 않고 `ordinal`로 조회 |
 | 문맥 머리말 | `header` = `문서명 > 장 > 조`. 표지 child는 `보수규정 시행세칙 > 보수규정 시행세칙`처럼 같은 항목이 반복되고, 작은 child를 합친 경우 첫 절만 나옴(예: c041) | 로더가 연속 중복을 줄여 dense 입력 · `dense_text`의 계층정보로 쓴다 (§6.2). 합친 child의 머리말 규칙은 전처리 과제 |
 
-로컬 2건의 규모입니다. 138건 결과를 받으면(TODO.md 2단계) 다시 셉니다.
+처음 조사한 로컬 2건의 규모입니다(2026-10-28). 138건 적재 뒤 규모는 [RDB_SPEC.md](RDB_SPEC.md) §9 · [VDB_SPEC.md](VDB_SPEC.md) §9에 있습니다.
 
 | 문서 | 쪽 | child | parent | 수치 child | 본문 토큰 | 도구 (상태) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
@@ -88,7 +89,7 @@
 
 ## 3. 적재 원칙
 
-1. **PostgreSQL에는 질의 처리와 재색인에 쓰는 것만 넣습니다.** 열마다 router · planner · agent · MCP 도구 · 재색인 중 어디서 읽는지가 있어야 합니다(§4.2). 쪽 대조, 구조 트리, 도구 검사 결과, 검증 이력은 전처리 산출물 파일이 원본이고 전처리 뷰어에서 봅니다.
+1. **PostgreSQL에는 질의 처리와 재색인에 쓰는 것만 넣습니다.** 열마다 router · planner · read · tool · 재색인 중 어디서 읽는지가 있어야 합니다(§4.2). 쪽 대조, 구조 트리, 도구 검사 결과, 검증 이력은 전처리 산출물 파일이 원본이고 전처리 뷰어에서 봅니다.
 2. **Qdrant는 PostgreSQL만으로 다시 만들 수 있어야 합니다.** 임베딩 모델을 바꿀 때 전처리 산출물을 다시 읽지 않습니다. 사람은 Qdrant를 직접 고치지 않습니다.
 3. **전처리와 적재는 파일로만 이어집니다.** 로더는 `data/docs/{doc_id}/`를 읽기만 하고 전처리 코드를 import하지 않습니다. 파일 형식은 `schema_version`(§2.3)과 로더 쪽 pydantic 모델로 검증하고, 형식이 바뀌면 명시적으로 실패합니다.
 4. **문서 판 1건이 적재 단위입니다.** 한 판의 행은 트랜잭션 하나로 넣고, 같은 입력으로 다시 실행해도 결과가 같아야 합니다(멱등).
@@ -119,11 +120,11 @@ erDiagram
 | `regulation_key` | `text` | 현행 판 판정. `alio:{idx}` 또는 `manual:{doc_id}` |
 | `name` | `text` | router 후보 표시, 근거 표시, 임베딩 입력 |
 | `amended_on` | `date` null | 현행 판 판정 (ALIO 제개정일) |
-| `status` | `text` | `LOADED` · `INDEXED` · `SUPERSEDED` · `REPEALED` (§7.4) |
+| `status` | `text` | `LOADED` · `INDEXED` · `SUPERSEDED` · `REPEALED` ([RDB_SPEC.md](RDB_SPEC.md) §4) |
 | `is_current` | `bool` | 검색 결과 재확인. `UNIQUE(regulation_key) WHERE is_current` |
 | `summary`, `not_for` | `text` | router 후보 표시 (`summary`는 임베딩 입력도) |
 | `keywords`, `questions` | `text[]` | catalog 재색인 |
-| `content_hash` | `text` | 적재한 산출물(`chunks` · `summaries` · `tools` · `verify`)의 묶음 해시. 같으면 적재를 건너뜀 |
+| `content_hash` | `text` | 적재한 산출물(`meta` · `chunks` · `summaries` · `tools` · `verify`)과 `LOAD_VERSION`의 묶음 해시([RDB_SPEC.md](RDB_SPEC.md) §5). 같으면 적재를 건너뜀 |
 | `indexed_hash` | `text` null | catalog 포인트(요약 + 예상 질문)를 마지막으로 색인한 입력의 해시 |
 
 **`sections`** — parent
@@ -148,7 +149,7 @@ erDiagram
 | `id` | `uuid` PK | §5 |
 | `document_id`, `section_id` | FK | 문서 필터, parent 묶기 |
 | `ordinal` | `int` | 앞뒤 이웃 조회 |
-| `header`, `body` | `text` | agent 원문 조회, 리랭크 입력, 임베딩 입력. 원문과 머리말은 분리해 저장 (설계 노트 §5.3.2 규칙 3) |
+| `header`, `body` | `text` | planner 미리보기 · read 원문 조회, 임베딩 입력. 원문과 머리말은 분리해 저장 (설계 노트 §5.3.2 규칙 3) |
 | `tokens` | `int` | 컨텍스트 예산 계산 (seed32-think 토크나이저 기준) |
 | `page_start`, `page_end` | `int` | 근거 표시 |
 | `searchable` | `bool` | 색인 대상 여부 |
@@ -162,13 +163,13 @@ erDiagram
 | :--- | :--- | :--- |
 | `id` | `uuid` PK | `uuid5(doc_id : tool : spec_hash)` |
 | `document_id` | FK | 추출한 문서 |
-| `section_id` | FK | 근거 parent (도구 결과의 `basis`에 쪽 표시) |
-| `name` | `text` | MCP 도구 이름, 문서 안 `lookup` 대상. `UNIQUE(document_id, name)` |
-| `spec` | `jsonb` | MCP `list_tools` 노출과 `tools_exec.run(spec, args, tables)` 실행. 종류 · 설명 · 입력 · 단위가 모두 여기 있음 |
+| `section_id` | FK | 근거 parent (계산 결과 근거 카드의 절 제목 · 쪽) |
+| `name` | `text` | 도구 이름, 문서 안 `lookup` 대상. `UNIQUE(document_id, name)` |
+| `spec` | `jsonb` | `search.list_tools` 노출과 `tools_exec.run(spec, args, tables)` 실행. 종류 · 설명 · 입력 · 단위가 모두 여기 있음 |
 
 - **적재 조건**은 `preprocess.tools.approved`와 같습니다: `verify.json`에 `tool:{spec_hash}` 검증 표시가 있고 · stale이 아니며 · `checks.status`가 `error`가 아님. 로더는 전처리 코드를 부르지 않으므로 `tools.json`에 저장된 `checks.status`를 씁니다.
 - `lookup`이 부르는 표 도구(`table_lookup`)도 같은 조건으로 들어옵니다. 승인되지 않은 표를 부르는 식 도구는 실행할 수 없으므로 함께 뺍니다.
-- MCP에 노출할 때 도구 이름은 문서끼리 겹칠 수 있어 접두어를 붙입니다. 규칙은 MCP 서버 구현 때 정합니다.
+- LLM에는 도구를 `t1, t2…` 별칭으로 보여 주므로 문서끼리 도구 이름이 겹쳐도 됩니다(`backend/graph.py`).
 
 **`document_tools`** — `(document_id, tool_id)` PK
 
@@ -208,12 +209,12 @@ erDiagram
 
 | 항목 | `reg_catalog` | `reg_chunks` |
 | :--- | :--- | :--- |
-| 쓰는 곳 | router: 문서 후보 10~20개 | planner: 선택 문서(최대 3개) 안의 parent · child 후보 |
+| 쓰는 곳 | router: 문서 후보 20개 | planner: 선택 문서(최대 3개) 안의 parent · child 후보 |
 | 물리 이름 | `reg_catalog__bge-m3-ko__1024` | `reg_chunks__bge-m3-ko__1024` |
 | 임베딩 없을 때 | `reg_catalog__bm25__0` | `reg_chunks__bm25__0` |
 | 벡터 | `dense`(1024, COSINE) + `bm25`(sparse, IDF) | 같음 |
 
-- 앱은 별칭으로만 읽고 씁니다. 기동 시 별칭 대상 컬렉션의 벡터 설정(모델 · 차원 · sparse)이 현재 설정과 다르면 오류로 멈춥니다(원 프로젝트 `CollectionMismatch`). 모델 · 차원은 물리 이름에 들어 있어 따로 기록하지 않습니다.
+- 앱은 별칭으로만 읽고 씁니다. `ingest sync` 시작 때 별칭 대상 컬렉션의 벡터 설정(모델 · 차원 · sparse)이 현재 설정과 다르면 `CollectionMismatch`로 멈춥니다(원 프로젝트와 같음. 백엔드 기동 때는 검사하지 않음). 모델 · 차원은 물리 이름에 들어 있어 따로 기록하지 않습니다.
 - 원 프로젝트처럼 컬렉션 하나에 다 넣지 않는 이유: 문서 선택과 청크 검색은 질의 시점 · 필터 · 묶는 기준(`doc_id` vs `section_id`)이 다르고, 문서 포인트가 청크보다 훨씬 적어 섞으면 문서 후보 검색이 청크에 묻힙니다.
 - PoC는 Qdrant 1대로 시작합니다. 원 프로젝트의 2대 이중화는 운영 전환 때 들여옵니다.
 
@@ -223,10 +224,10 @@ erDiagram
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `reg_catalog` | `doc_summary` | 판당 1 | `{문서명}\n{summary}\n키워드: {keywords}` | dense와 같음 | `uuid5(f"{doc_id}:doc_summary")` |
 | `reg_catalog` | `doc_question` | 판당 5~8 | `{question}` | dense와 같음 | `uuid5(f"{doc_id}:doc_question:{i}")` |
-| `reg_chunks` | `parent_summary` | searchable parent당 1 | `[{문서명} > {title}]\n{covers}\n키워드: {keywords}\n예상 질문: {questions}` | dense와 같음 | `uuid5(f"{section_id}:summary")` |
+| `reg_chunks` | `parent_summary` | searchable이고 `covers`가 있는 parent당 1 | `[{문서명} > {title}]\n{covers}\n키워드: {keywords}\n예상 질문: {questions}` (질문이 있을 때만) | dense와 같음 | `uuid5(f"{section_id}:summary")` |
 | `reg_chunks` | `child` | searchable child당 1 | `[{header}]\n{body}` (계층정보 + child 원문) | `{body}` (child 원문만) | `chunks.id` |
 
-- **넣지 않는 것**: `not_for` · `not_covers`(이웃 문서 단어로 엉뚱한 질의에 걸림, 설계 노트 §4.2), `searchable=false` child(목차), 현행이 아닌 판.
+- **넣지 않는 것**: `not_for` · `not_covers`(이웃 문서 단어로 엉뚱한 질의에 걸림, 설계 노트 §4.2), `searchable=false` child(목차), `SUPERSEDED` · `REPEALED` 판. 새 판은 현행 전환 전에 `is_current=false`로 넣습니다(§7.3).
 - 예상 질문을 따로 포인트로 두는 이유는 설계 노트 §5.2(질문형 질의가 예상 질문과 가장 잘 맞음). 검색 뒤 `doc_id`로 묶습니다.
 - **child의 dense와 sparse 입력을 나누는 이유** (설계 노트 §5.3.2 규칙 3):
   - dense에는 계층정보(`header`, 연속 중복은 하나로)를 붙여 "② 단, 위의 경우는…" 같은 child도 문맥을 갖고 검색되게 합니다. 계층정보는 중앙값 24토큰, 최대 43토큰(로컬 2건)이라 입력 한도에 부담이 없습니다.
@@ -256,28 +257,19 @@ erDiagram
 - 쪽번호 · 제목은 넣지 않습니다. 근거 표시에만 쓰여 재확인 SQL로 충분합니다.
 - `is_current` · `verified`가 바뀌면 다시 임베딩하지 않고 `set_payload`로 고칩니다.
 
-### 6.4 검색에서 쓰는 방식 (참고)
+### 6.4 검색에서 쓰는 방식
 
-검색 API는 다음 문서에서 정하지만, 적재 구조가 아래 사용을 받쳐야 합니다.
+검색은 `backend/search.py`에 구현했고, 명세는 [VDB_SPEC.md](VDB_SPEC.md) §7(Qdrant) · [RDB_SPEC.md](RDB_SPEC.md) §7(PostgreSQL 재확인)입니다. 적재 구조가 받쳐야 하는 것만 남깁니다.
 
-```text
-router  : reg_catalog  질의 분석이 다시 쓴 질의로 dense top 40 + bm25 top 40 (filter is_current)
-          → 앱 RRF(k=60, 포인트 단위) → doc_id별 최고 점수로 묶기 → 문서 후보 10~20
-          → PostgreSQL에서 documents(name, summary, not_for, is_current) 조회
-planner : reg_chunks   dense + bm25 (filter is_current, doc_id ∈ 선택 문서)
-          → 앱 RRF → PostgreSQL에서 chunks · sections 조회(재확인 + 본문) → 리랭크(child)
-          → section_id로 묶어 "parent 요약(covers · not_covers) + 적중 child 표시"
-agent   : get_chunks(ids) → PostgreSQL에서 child + ordinal 앞뒤 이웃
-```
-
-- RRF는 원 프로젝트처럼 앱 코드에서 합칩니다(Qdrant 내장 fusion을 쓰지 않음). 설계 노트 §5.2의 "Qdrant Query API RRF"는 이것으로 바꿉니다(§11-2).
-- 후보 수 · 최종 수 · 출처 다양성 단위(문서 또는 parent)는 평가로 정합니다(원 프로젝트 §7.2).
+- router는 `reg_catalog`를, planner는 선택 문서로 거른 `reg_chunks`를 dense + BM25로 검색해 **앱 RRF**로 합칩니다(Qdrant 내장 fusion을 쓰지 않음, §11-2). `doc_id` · `section_id`로 묶으므로 payload에 두 키가 필요합니다.
+- 원문 · 쪽 · 검증 여부는 PostgreSQL에서 읽습니다(원칙 6).
+- 리랭커는 아직 연결하지 않았습니다. 후보 수 · 출처 다양성 단위는 평가로 정합니다(원 프로젝트 §7.2).
 
 ### 6.5 동기화
 
 별도 장부 없이 원본 행의 `indexed_hash`로 판단합니다.
 
-1. 이번에 적재한 판마다 PostgreSQL에서 "있어야 할 포인트"와 각 포인트의 임베딩 입력(§6.2)을 만듭니다. 입력 해시는 dense 입력과 sparse 입력을 함께 넣어 계산합니다.
+1. `status IN ('LOADED','INDEXED')`인 판마다(`--doc`으로 좁힐 수 있음) PostgreSQL에서 "있어야 할 포인트"와 각 포인트의 임베딩 입력(§6.2)을 만듭니다. 입력 해시는 dense 입력과 sparse 입력을 함께 넣어 계산합니다.
 2. 입력 해시가 원본 행의 `indexed_hash`와 다른 포인트만 임베딩해 upsert하고, 성공하면 `indexed_hash`를 갱신합니다. 입력 해시에는 `EMBED_TEXT_VERSION` · 물리 컬렉션 이름 · `avgdl`도 넣어, 이것들이 바뀌면 다시 색인됩니다. catalog 포인트는 판 하나를 묶음으로 봅니다(`documents.indexed_hash`, 요약이 바뀌면 질문 포인트까지 함께 다시 임베딩. 판당 10개 안팎).
 3. 해시가 같은 포인트는 payload 전체를 덮어씁니다(`verified` · `is_current`, 그리고 재청킹으로 parent ID가 바뀐 형제 child의 `section_id`. 컬렉션마다 `batch_update_points` 요청 하나).
 4. Qdrant에서 그 `doc_id`의 포인트 ID를 훑어(`scroll`, ID만) 1의 목록에 없는 것을 지웁니다. 재청킹으로 사라진 청크가 여기서 정리됩니다.
@@ -308,7 +300,7 @@ flowchart LR
 | 지원하지 않는 형식 버전 | `meta.schema_version`(없으면 1)이 로더의 지원 목록에 없음 (§2.3) |
 | 파일 형식 오류 | pydantic 검증 실패 |
 | 문서 요약 없음 | `summaries.doc.error` 있음 또는 `summary` 비어 있음 |
-| parent 요약 문제 | 빠진 parent, `error`, stale (`parent_hash` ≠ parent `hash`) |
+| parent 요약 문제 | searchable parent의 요약이 빠짐 · `error` · stale (`parent_hash` ≠ parent `hash`) |
 | 잘린 쪽 | `parse.truncated` 있음 |
 
 - 쪽 대조(`compare.flagged`)와 도구 오류는 적재를 막지 않습니다. 쪽 대조는 전처리 뷰어의 검증 대상이고, 도구는 승인된 것만 들어오기 때문입니다.
@@ -319,11 +311,13 @@ flowchart LR
 
 문서 판 하나를 트랜잭션 하나로 처리합니다.
 
-1. `documents`를 `doc_id`로 upsert. 산출물 묶음 해시(`content_hash`)가 이전과 같으면 2~4를 건너뜁니다.
+1. `documents`의 `content_hash`를 먼저 읽어(`FOR UPDATE`) 이번 묶음 해시와 같으면 이 판 전체를 건너뜁니다. 다르면 `documents`를 `doc_id`로 upsert합니다.
 2. `sections` · `chunks`를 §5의 ID로 upsert하고, 이번 입력에 없는 행(재청킹으로 사라진 것)은 지웁니다. 내용이 같은 행은 ID가 같으므로 `indexed_hash`가 남습니다. `ordinal`은 매번 새 값으로 씁니다.
 3. `chunks.verified`를 `verify.json`의 `{child hash}` 표시로 채웁니다.
-4. 승인된 도구를 upsert하고 승인이 풀린 도구는 지웁니다. `document_tools`는 `added_by='ingest'` 행만 맞춥니다.
+4. 승인된 도구를 upsert하고 승인이 풀린 도구는 지웁니다. 지운 도구의 `document_tools` 연결은 `manual` 행까지 CASCADE로 지워지고, 남은 도구는 추출 문서와 `added_by='ingest'`로 잇습니다(이미 있으면 그대로).
 5. 새 판이면 `status=LOADED`, `is_current=false`로 둡니다. 이미 현행인 판을 다시 적재한 경우에는 상태를 그대로 둡니다.
+
+열별 갱신 규칙 · 삭제 순서는 [RDB_SPEC.md](RDB_SPEC.md) §6.1입니다.
 
 ### 7.3 동기화와 현행 판 전환
 
@@ -335,16 +329,11 @@ flowchart LR
 
 ### 7.4 문서 판 상태
 
-| 상태 | 의미 | 검색 |
-| :--- | :--- | :---: |
-| `LOADED` | PostgreSQL에 들어감, 색인 전이거나 색인 실패 | X |
-| `INDEXED` | 색인 완료 | `is_current`일 때 O |
-| `SUPERSEDED` | 새 판으로 바뀜 | X |
-| `REPEALED` | 규정 폐지 | X |
+`LOADED` → `INDEXED` → `SUPERSEDED` · `REPEALED`. 상태별 의미와 포인트 · `indexed_hash` 상태는 [RDB_SPEC.md](RDB_SPEC.md) §4입니다.
 
 ### 7.5 점검
 
-적재 · 동기화가 끝날 때마다 판별로 확인하고 로그에 남깁니다.
+산출물 개수는 `load`가 판마다 트랜잭션 안에서, 나머지는 `sync` 끝과 `ingest check`가 확인합니다(불변식 상세는 [RDB_SPEC.md](RDB_SPEC.md) §8 · [VDB_SPEC.md](VDB_SPEC.md) §8).
 
 - 산출물 개수 = PostgreSQL 행 수 (child · parent · 승인 도구)
 - PostgreSQL에서 계산한 포인트 수 = Qdrant `count(filter doc_id)`
@@ -361,9 +350,10 @@ flowchart LR
 | 문서 요약만 다시 생성 | `documents` 요약 열 갱신 | 그 판의 catalog 포인트 |
 | 검증 · 승인 표시만 바뀜 | `chunks.verified` · `tools` 갱신 | 없음 (`set_payload`) |
 | 규정 개정 (새 PDF) | 새 판 적재 → 색인 → 현행 전환 | 새 판 전체 |
-| 규정 폐지 | 현행 판을 `REPEALED` · `is_current=false` | 포인트 삭제 |
-| 임베딩 모델 교체 | 새 물리 컬렉션을 PostgreSQL에서 채움 → 평가 → 별칭 전환 (원 프로젝트 §2.5). 새 컬렉션용 `indexed_hash`는 쓰지 않고 전량 적재 | 전체 (재파싱 없음) |
-| BM25 토큰 규칙 · `avgdl` · 입력 형식 변경 | 위와 같은 절차 | 전체 |
+| 규정 폐지 | (코드 없음) SQL로 `REPEALED` · `is_current=false` + 포인트 삭제 ([RDB_SPEC.md](RDB_SPEC.md) §4) | 없음 |
+| `avgdl` · 입력 형식(`EMBED_TEXT_VERSION`) 변경 | `sync`가 입력 해시 차이로 같은 컬렉션에 전체를 다시 임베딩 | 전체 |
+| BM25 토큰 규칙 변경 | 입력 해시에 들어가지 않으므로 `EMBED_TEXT_VERSION`을 함께 올림 | 전체 |
+| 임베딩 모델 교체 | 새 물리 컬렉션을 PostgreSQL에서 채움 → 평가 → 별칭 전환 (원 프로젝트 §2.5, 명령 미구현 §10 7단계). 새 컬렉션용 `indexed_hash`는 쓰지 않고 전량 적재 | 전체 (재파싱 없음) |
 
 - 모델 교체처럼 컬렉션을 통째로 새로 만들 때는 `indexed_hash`와 상관없이 전량을 넣고, 별칭을 전환할 때 `indexed_hash`를 새 컬렉션 기준으로 다시 씁니다. 두 컬렉션을 오래 나란히 운영하지 않는다는 전제입니다.
 
@@ -388,14 +378,14 @@ flowchart LR
 | 모델 · 차원 · 거리 | `bge-m3-ko`, 1024, COSINE | |
 | 접두어 | 없음 | |
 | 배치 · 동시성 · 타임아웃 | 32 · 2 · 60초 | |
-| 최대 입력 | 8192토큰, 넘으면 앞부분 + 경고 | child는 표를 포함해도 천 토큰 안팎이라 여유 있음 |
+| 최대 입력 | 8192토큰. `truncate_prompt_tokens`로 서버가 자름(경고 없음) | child는 표를 포함해도 천 토큰 안팎이라 여유 있음 |
 | 차원 검증 | 응답 길이 ≠ 1024면 그 배치 전체 실패 | 섞인 벡터 금지 |
 | sparse 토큰 | 낱말(`[0-9A-Za-z가-힣]+`, 소문자) + 한글이 든 세 글자 이상 낱말 안 2-gram, 한 글자 · 불용어 제외, CRC32(충돌은 값을 더함) | 색인 · 질의 같은 `sparse.tokens()`. 불용어는 규정용 소수(및 · 등 · 또는 · 해당 · 경우 · 관한 · 따른 …, `ingest/sparse.py`)로 시작. 원 프로젝트 목록은 국회 요구자료 기준이라 쓰지 않음 |
 | 문서 값 | BM25 TF 포화, `k1=1.2`, `b=0.75` | |
-| `avgdl` | **컬렉션별 실측값**: 첫 색인 때 포인트의 sparse 토큰 수 평균. `reg_chunks`의 child는 원문만 센다 | 원 프로젝트 700 대신. `reg_catalog`(질문이 아주 짧음)와 `reg_chunks`가 다름. 설정(`RAG_BM25_AVGDL_CATALOG` · `_CHUNKS`)에 고정하고, 바꾸면 재색인. 설정이 없으면 `sync`가 실측값을 알려 주고 멈춤. 로컬 2건 실측 catalog 43.4 · chunks 110.2 (138건 적재 때 다시 잼) |
-| 리랭커 | `bge-reranker-v2-m3-ko`, Cohere 호환 `/v1/rerank`. child 입력은 payload `dense_text`(계층정보 + 원문) | 리랭크 서버의 최대 길이를 확인해 큰 표 child가 잘리지 않는지 본다 |
+| `avgdl` | **컬렉션별 실측값**: 첫 색인 때 포인트의 sparse 토큰 수 평균. `reg_chunks`의 child는 원문만 센다 | 원 프로젝트 700 대신. `reg_catalog`(질문이 아주 짧음)와 `reg_chunks`가 다름. 설정(`RAG_BM25_AVGDL_CATALOG` · `_CHUNKS`)에 고정하고, 바꾸면 재색인. 설정이 없으면 `sync`가 실측값을 알려 주고 멈춤. 현재 값은 [VDB_SPEC.md](VDB_SPEC.md) §5.2 |
+| 리랭커 (아직 연결하지 않음) | `bge-reranker-v2-m3-ko`, Cohere 호환 `/v1/rerank`. child 입력은 payload `dense_text`(계층정보 + 원문) | 리랭크 서버의 최대 길이를 확인해 큰 표 child가 잘리지 않는지 본다 |
 
-- 문서가 늘어 평균이 조금 바뀌어도 `avgdl`은 그대로 두고, 크게 바뀌면(예: ±30%) 모델 교체와 같은 절차로 새 컬렉션을 만듭니다.
+- 문서가 늘어 평균이 조금 바뀌어도 `avgdl`은 그대로 둡니다. 바꾸면 `sync`가 같은 컬렉션에 전체를 다시 임베딩합니다(입력 해시에 포함). 138건 적재 때 로컬 2건 임시값에서 실측값으로 바꿔 이렇게 재색인했습니다. 검색 중단 없이 바꾸려면 새 컬렉션 · 별칭 전환(§10 7단계, 미구현)을 씁니다.
 - 임베딩이 없을 때는 `__bm25__0` 컬렉션으로 sparse만 색인해 검색이 돌아가게 합니다.
 
 ---
@@ -407,14 +397,14 @@ flowchart LR
 | 1 | **인프라**: 로컬 공용 컨테이너(`comwel-postgres-local` PG 18 · `comwel-qdrant-local` 1.15.4)에 DB `kicox`와 `reg_*` 컬렉션을 따로 둠(docker-compose는 만들지 않음). `.env`에 접속 정보. 스키마는 SQL 마이그레이션 파일(`db/migrations/0001_init.sql`) | `python -m ingest migrate`로 DB 생성 · 마이그레이션 적용 |
 | 2 | **입력 읽기 · 관문**: `ingest/reader.py`, `ingest/gate.py`. 산출물을 `schema_version`별 pydantic 모델로 읽고 stale · 승인 여부를 계산 (전처리 코드 import 없음) | 로컬 2건을 읽고 관문 결과 출력 |
 | 3 | **PostgreSQL 적재**: `ingest/load.py`. CLI `uv run python -m ingest load --src ../kicox_regulation_prep/data/docs [--doc ID] [--dry-run]`. PDF · 쪽 이미지는 `storage/docs/{doc_id}/`로 복사 | 2건 적재, 같은 입력으로 다시 실행해 변경 0건 |
-| 4 | **임베딩 · sparse 모듈**: `embed(texts)`, `sparse(texts)` (설계 노트 §5.4-1). sparse는 원 프로젝트 `sparse.py`와 같은 입력에 같은 결과를 내는지 비교 | 단위 테스트 |
+| 4 | **임베딩 · sparse 모듈**: `get_embedder().embed(texts, kind)`, `sparse.tokens()` · `document()` · `query()` (설계 노트 §5.4-1) | 단위 테스트 (원 프로젝트 `sparse.py` 결과와의 비교는 하지 않음) |
 | 5 | **동기화**: `python -m ingest sync`. 컬렉션 생성 · 별칭, `indexed_hash` 비교, 현행 판 전환, §7.5 점검 | 2건 색인, 재청킹 1건으로 바뀐 child만 다시 임베딩되는지 확인 |
-| 6 | **138건 적재**: 서버 결과를 받은 뒤(TODO.md 2단계) 일괄 적재 | 적재 · 관문 탈락 건수와 사유 보고 |
+| 6 | **138건 적재**: 전처리 서버 결과를 받은 뒤 일괄 적재 (완료, §10.2) | 적재 · 관문 탈락 건수와 사유 보고 |
 | 7 | **재색인 · 별칭 전환**: `python -m ingest reindex --model …`, `switch-alias` | 같은 모델로 새 컬렉션을 만들어 별칭 전환 연습 |
-| 8 | **검색 도구 연결**: `search(query, category?)`, `list_docs`, `get_chunks(ids)` (설계 노트 §5.4-4, 별도 문서) | 기존 평가 질의로 검색 재현율@20 측정 |
+| 8 | **검색 함수 연결** (구현, `backend/search.py`): `search_docs` · `search_chunks` · `list_sections` · `get_chunks` · `list_tools` (설계 노트 §5.4-4) | 기존 평가 질의로 검색 재현율@20 측정 (미실시) |
 
 - 1~5는 로컬 2건으로 끝낸 뒤 6으로 갑니다.
-- 규모 감: 로컬 2건이 쪽당 child 약 4~5개입니다. 138건 평균을 10쪽으로 잡으면 child 약 6천, 포인트 약 7천 개로, Qdrant 1대로 충분합니다. 시간은 대부분 임베딩에서 나오므로 138건을 받은 뒤 임베딩 속도를 재서 다시 적습니다(로컬 2건 157포인트는 약 1초).
+- 규모 감: 로컬 2건이 쪽당 child 약 4~5개입니다. 138건 평균을 10쪽으로 잡으면 child 약 6천, 포인트 약 7천 개로, Qdrant 1대로 충분합니다(실측 child 6,572 · 포인트 9,035, §10.2). 시간은 대부분 임베딩에서 나오므로 138건을 받은 뒤 임베딩 속도를 재서 다시 적습니다(로컬 2건 157포인트는 약 1초).
 
 ### 10.1 구현 결과 (2026-10-28, 1~5단계)
 
@@ -426,14 +416,9 @@ flowchart LR
 | `ingest/embed.py` · `sparse.py` | §9 임베딩(배치 32 · 동시성 2 · 재시도 분류 · 차원 검증) · BM25 |
 | `ingest/points.py` · `sync.py` | §6.2 · §6.3 포인트를 PostgreSQL에서 만듦, §6.5 동기화, §7.3 현행 판 전환, §7.5 점검, 별칭 정합성 검사(`CollectionMismatch`) |
 | `tests/test_ingest.py` | ID · 관문 · 도구 승인 · 머리말 · BM25 단위 테스트 (DB 없이) |
+| `tests/test_search.py` | RRF · 묶기 · LLM JSON 파싱 · 도구 호출 실행 · 계산 근거 단위 테스트 (DB 없이) |
 
-```bash
-uv run python -m ingest migrate
-uv run python -m ingest load [--src DIR] [--doc ID ...] [--dry-run]
-uv run python -m ingest sync [--doc ID ...]     # 동기화 → 현행 판 전환 → 점검
-uv run python -m ingest check
-uv run pytest
-```
+명령과 종료 코드는 README "DB 적재"에 있습니다.
 
 로컬 검증 결과:
 
@@ -446,23 +431,32 @@ uv run pytest
 | 재청킹 | child 1개 본문 수정(parent 해시도 바뀜) → 임베딩 2(child · parent 요약) · 삭제 2, 형제 child 10개는 벡터 유지 · payload `section_id`만 새 parent로 바뀜 |
 | 판 전환 | 같은 `idx`의 제개정일이 늦은 가짜 판 적재 → 새 판 현행, 이전 판 `SUPERSEDED` · 포인트 0 · `indexed_hash` 비움. 이전 판을 다시 살리면 42건 전량 색인 |
 
-- 도구 적재(`tools` · `document_tools`)는 승인 표시가 있는 산출물이 없어 단위 테스트로만 확인했습니다. 전처리 뷰어에서 도구를 하나 승인한 뒤 다시 적재해 봐야 합니다.
+- 도구 적재(`tools` · `document_tools`)는 이때 승인 표시가 있는 산출물이 없어 단위 테스트로만 확인했고, 138건 적재 때 승인 도구로 확인했습니다(§10.2).
 - 질의 하나("퇴직하면 복지포인트는 어떻게 되나요?")로 본 첫인상: `reg_chunks` BM25 상위가 parent 요약 포인트로 채워집니다(키워드 · 예상 질문이 붙어 질의 낱말과 많이 겹침). dense 상위는 child와 parent 요약이 섞입니다. 검색 단계에서 child와 parent 요약을 따로 뽑을지 정합니다(§11-10).
+
+### 10.2 138건 적재 (2026-10-29)
+
+| 확인 | 결과 |
+| :--- | :--- |
+| 적재 · 색인 | 문서 판 138건 모두 `INDEXED` · 현행 (규정 138개) |
+| 행 | sections 1,263 · chunks 6,572 (수치 child 2,023, 검증 0) · tools 11 (4개 문서, 모두 `formula`) · document_tools 11 (모두 `ingest`) |
+| 포인트 | `reg_catalog` 1,200 · `reg_chunks` 7,835 |
+| `avgdl` | 실측 catalog 41.2 · chunks 178.1로 바꾸고 전체 재색인. 점검 정상 |
 
 ---
 
 ## 11. 열린 질문
 
 1. **(확정 2026-10-28: 2-gram, Kiwi는 평가에서 비교) BM25 토큰화: 원 프로젝트(2-gram) vs 설계 노트(Kiwi)**. 설계 노트 §5.2는 "Kiwi 형태소 분석 + 안정 해시"를 확정했고, [ASSEMBLY_RAG_REFERENCE.md](ASSEMBLY_RAG_REFERENCE.md) §7.1은 원 프로젝트 방식을 따른다고 적었습니다. 2-gram은 "출장비를" · "출장비"가 2-gram(`출장`, `장비`)을 공유해 조사 문제를 어느 정도 덮고, 원 프로젝트 공통 부품으로 옮기기 쉽습니다. 본 계획은 **원 프로젝트 방식을 기본으로 하고 Kiwi를 평가에서 비교**하는 쪽으로 적었습니다. 확정에 맞춰 설계 노트 §5.2를 고쳤습니다.
-2. **RRF 위치**: 설계 노트 §5.2의 "Qdrant Query API RRF"를 원 프로젝트처럼 앱 RRF로 바꿀지. 앱 RRF여야 질의별 순위 기록(원 프로젝트 §3.6)과 합의 보존 규칙을 쓸 수 있습니다.
-3. **미검증 수치 청크**: 검색에 넣고 표시만 붙일지(본 계획), 엄격 모드로 뺄지.
+2. **(확정 2026-10-28: 앱 RRF, `backend/search.py`) RRF 위치**: 설계 노트 §5.2의 "Qdrant Query API RRF"를 원 프로젝트처럼 앱 RRF로 바꿀지. 앱 RRF여야 질의별 순위 기록(원 프로젝트 §3.6)과 합의 보존 규칙을 쓸 수 있습니다.
+3. **(잠정: 검색에 넣고 "검증 전 수치" 표시) 미검증 수치 청크**: 검색에 넣고 표시만 붙일지(본 계획), 엄격 모드로 뺄지.
 4. **검증 화면 이전 시점**: 전처리 뷰어(`verify.json`)를 언제까지 검증 원본으로 둘지. 옮기면 §4.3의 검증 테이블 · 쪽 테이블이 필요해집니다.
 5. **시행일**: ALIO 제개정일만으로 현행 판을 정해도 되는지, 부칙의 시행일을 뽑아 써야 하는지.
 6. **폐지 규정 판정**: ALIO 수집 결과에서 사라진 규정을 폐지로 볼지, 사람이 확인할지.
-7. **카테고리 분류안**: 138건 목록과 문서 요약이 생겼으므로 분류 초안을 만들 수 있습니다(설계 노트 §7).
+7. **카테고리 분류안**: 138건을 적재해 문서 요약이 모두 있으므로 분류 초안을 만들 수 있습니다(설계 노트 §7).
 8. **child dense 입력에 parent `covers` 첫 문장을 넣을지**: 기본은 `계층정보 + 원문`(요구사항)입니다. `covers`를 더한 변형과 기존 평가 질의의 청크 재현율을 비교해, 나을 때만 넣습니다. 넣으면 parent 요약을 다시 만들 때 child도 다시 임베딩됩니다.
 9. **합친 child의 계층정보**: "작은 child 합침"으로 여러 절에 걸친 child는 `header`에 첫 절만 나옵니다(c041: `> 부칙`이지만 이전 부칙 제2조와 `부칙 <2013.08.07.>`이 섞임). 전처리에서 걸친 절을 모두 적을지 정합니다.
-10. **`reg_chunks` 안 child · parent 요약 비율**: 한 컬렉션에서 함께 검색하면 BM25 상위를 parent 요약이 차지할 수 있습니다(§10.1). `kind`별로 따로 top-k를 뽑아 합칠지, 컬렉션을 나눌지 평가 질의로 정합니다.
+10. **(잠정 구현: `kind`별 top-k child 20 · parent 요약 10 → RRF, 평가로 확정) `reg_chunks` 안 child · parent 요약 비율**: 한 컬렉션에서 함께 검색하면 BM25 상위를 parent 요약이 차지할 수 있습니다(§10.1). `kind`별로 따로 top-k를 뽑아 합칠지, 컬렉션을 나눌지 평가 질의로 정합니다.
 
 ---
 
@@ -475,3 +469,4 @@ uv run pytest
 | 2026-10-28 | 계층정보 요구사항 반영: child dense는 `계층정보 + 원문`, sparse는 원문만. payload에 child `text` · `dense_text` 추가(PostgreSQL 재확인은 유지). parent `covers` 첫 문장은 기본 입력에서 빼고 평가로 결정. 입력 해시는 dense · sparse 입력을 함께, 리랭크 입력은 `dense_text`, child `avgdl`은 원문 기준. 열린 질문 8 · 9 추가 |
 | 2026-10-28 | 산출물 형식 버전(§2.3) 추가: `meta.json`의 정수 `schema_version`, 없으면 1(`c97fd03` 형식). 로더가 읽는 필드의 이름 · 삭제 · 의미가 바뀔 때만 올리고, 지원하지 않는 버전은 관문에서 탈락(§7.1). 로더를 `kicox_regulation_rag`에 두는 근거로 설계 노트 §5.5 연결 |
 | 2026-10-28 | §10 1~5단계 구현(§10.1): 공용 로컬 컨테이너에 DB `kicox` · `reg_*` 컬렉션, 임베딩은 AI 서버 vLLM `bge-m3-ko`, BM25 2-gram 확정(§11-1). 구현 중 보완: 입력 해시에 물리 컬렉션 · `avgdl` 포함, 해시가 같은 포인트는 payload 전체를 덮어씀(재청킹 때 형제 child의 `section_id`), 이전 판 전환 시 `indexed_hash`를 비움, `avgdl` 미설정 시 실측값을 알리고 멈춤. 열린 질문 10 추가 |
+| 2026-10-29 | 정합성 정리: 138건 적재 결과(§10.2)와 도구 경로 구현 반영. MCP 도구 노출 서술을 `search.list_tools` · 별칭 방식으로, `avgdl` 변경은 같은 컬렉션 재색인으로 고침. 검색 방식(§6.4) · 상태 표(§7.4) · 명령 목록은 VDB · RDB 스펙과 README로 넘기고 링크만 남김. 열린 질문 2 · 3 · 10에 현재 결정 표시 |

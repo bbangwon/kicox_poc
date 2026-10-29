@@ -3,7 +3,7 @@
 본 문서는 `kicox_regulation_rag`가 쓰는 PostgreSQL 스키마의 **현재 구현 기준 명세**입니다. 왜 이렇게 정했는지(설계 근거 · 대안)는 [DB_LOADING_PLAN.md](DB_LOADING_PLAN.md)에 있고, 여기서는 테이블 · 열 · 제약 · 값 규칙 · 누가 언제 쓰고 읽는지만 정리합니다. Qdrant는 [VDB_SPEC.md](VDB_SPEC.md)를 봅니다.
 
 - **기준일**: 2026-10-29
-- **기준 코드**: `db/migrations/0001_init.sql`, `ingest/db.py` · `load.py` · `sync.py` · `ids.py` · `reader.py`, `backend/search.py`
+- **기준 코드**: `db/migrations/0001_init.sql`, `ingest/db.py` · `load.py` · `sync.py` · `ids.py` · `reader.py` · `gate.py` · `models.py`, `backend/search.py` · `graph.py`
 - **역할**: 서비스 데이터의 원본. Qdrant는 이 DB만으로 다시 만들 수 있어야 합니다(DB_LOADING_PLAN §3 원칙 2)
 
 ---
@@ -154,7 +154,7 @@ erDiagram
 | `document_id` | `text` FK → `documents.id` | N | | 도구를 추출한 문서 판 | |
 | `section_id` | `uuid` FK → `sections.id` | N | | 근거 parent | `tools[].parent_id` → 매핑 |
 | `name` | `text` | N | | `spec.name`. `UNIQUE (document_id, name)` | `tools[].spec.name` |
-| `spec` | `jsonb` | N | | 도구 정의 전체 (종류 `kind` · 설명 · 입력 · 단위 · `steps` 등). 형식은 [MCP_TOOL_DESIGN.md](MCP_TOOL_DESIGN.md) | `tools[].spec` |
+| `spec` | `jsonb` | N | | 도구 정의 전체 (종류 `kind` · 설명 · 입력 · 단위 · `steps` 등). 형식은 `backend/tools_exec.py` 머리말(원본 `kicox_regulation_prep/preprocess/tools_exec.py`) | `tools[].spec` |
 
 인덱스: `tools_pkey (id)`, `tools_document_id_name_key UNIQUE (document_id, name)`
 
@@ -177,6 +177,8 @@ erDiagram
 
 - 로더는 도구를 적재할 때 추출 문서와 `added_by='ingest'`로 잇고(`ON CONFLICT DO NOTHING`), 직접 지우지는 않습니다.
 - 도구의 승인이 풀려 `tools` 행이 지워지면 그 도구를 가리키는 연결은 `manual` 행까지 CASCADE로 지워집니다.
+- 다른 문서의 식 도구를 `manual`로 이을 때는 그 도구가 `lookup`으로 부르는 표 도구도 같은 문서에 함께 이어야 합니다. 실행기는 같은 문서에 노출된 도구 안에서만 표를 찾습니다(`backend/graph.py`).
+- 노출 여부는 연결한 문서의 `is_current`만 봅니다. 추출 문서가 `SUPERSEDED`가 되면 `manual` 연결을 새 판 도구로 옮겨야 합니다.
 
 ---
 
@@ -198,7 +200,7 @@ stateDiagram-v2
 | `REPEALED` | 규정 폐지 | X | 없어야 함 | — |
 
 - **현행 판 규칙** (`sync.switch_current`): 같은 `regulation_key`의 `INDEXED` 판 중 `amended_on`이 가장 늦은 판(NULL은 가장 뒤, 같으면 기존 현행 우선)이 `is_current = true`, 나머지 `INDEXED` 판은 `SUPERSEDED`.
-- 이전 판 행은 지우지 않습니다(이전 답변의 근거 링크용). 다시 살리면 `indexed_hash`가 비어 있어 전량 색인됩니다.
+- 이전 판 행은 지우지 않습니다(이전 답변의 근거 링크용). 다시 살리는 명령은 없습니다. SQL로 `status='LOADED'`로 되돌린 뒤 sync하면 `indexed_hash`가 비어 있어 전량 색인됩니다.
 - `REPEALED`로 바꾸는 코드는 아직 없습니다. 폐지는 SQL로 `status='REPEALED', is_current=false`를 쓰고 Qdrant 포인트를 지워야 합니다(폐지 판정은 DB_LOADING_PLAN §11-6에서 미정).
 
 ---
@@ -237,7 +239,7 @@ stateDiagram-v2
 
 3. 이번 입력에 없는 행 삭제: `chunks` → `tools`(승인이 풀린 것, 같은 이름의 새 spec이 UNIQUE에 걸리지 않도록 먼저) → `sections`.
 4. 행 수 확인: `sections` · `chunks` · `tools` 행 수가 산출물의 parent · child · 승인 도구 수와 다르면 예외로 롤백.
-5. 트랜잭션 밖에서 `source.pdf` · `pages/*.png`를 `storage/docs/{doc_id}/`로 복사 (DB에는 경로를 적지 않음).
+5. 트랜잭션 밖에서 `source.pdf` · `pages/*.png`를 `storage/docs/{doc_id}/`(환경변수 `STORAGE_DIR`로 바꿀 수 있음)로 복사 (DB에는 경로를 적지 않음).
 
 관문(`gate.check`)에 걸린 판은 행을 만들지 않습니다. 사유는 DB_LOADING_PLAN §7.1.
 
@@ -271,18 +273,18 @@ stateDiagram-v2
 | :--- | :--- | :--- | :--- |
 | `_search_docs` | router 문서 후보 표시 | `documents.id` · `name` · `summary` · `not_for` | `id = ANY(후보) AND status = 'INDEXED' AND is_current` |
 | `_list_sections` | planner 절 목록 | `sections.*`(id · ordinal · title · covers · not_covers · 쪽) + `documents.name` + 소속 searchable `chunks.id` 배열 | `document_id = ANY(선택 문서) AND d.is_current`, 선택 문서 순서 → `ordinal` 순 |
-| `_get_chunks` | agent 원문 조회 | `chunks.header` · `body` · 쪽 · `has_numbers` · `verified` + `documents.name` + `sections.title` | 요청 child와 같은 문서에서 `|ordinal 차| ≤ neighbors`(기본 1), `d.is_current` |
+| `_get_chunks` | planner 목차 미리보기(`neighbors=0`) · read 원문 조회(`neighbors=1`) | `chunks.header` · `body` · 쪽 · `has_numbers` · `verified` + `documents.name` + `sections.title` | 요청 child와 같은 문서에서 `|ordinal 차| ≤ neighbors`(기본 1), `d.is_current` |
+| `_list_tools` | plan 단계, 선택 문서의 승인 도구 (tool 노드가 씀) | `tools.id` · `spec` + `document_tools.document_id` + `documents.name` + `sections.title` · 쪽 | `dt.document_id = ANY(선택 문서) AND d.is_current`, 선택 문서 순서 → `sections.ordinal` → `tools.name` 순 |
 | `_documents` | 화면 상단 문서 목록 | `documents.id` · `name` · `amended_on` + 청크 수 | `is_current AND status = 'INDEXED'` |
 
 - 답변의 "검증 전 수치" 표시는 `chunks.has_numbers AND NOT chunks.verified`로 판단합니다.
-- `tools` · `document_tools`는 아직 질의 처리에서 읽지 않습니다(승인된 도구가 0개라 도구 경로 보류, RAG_DESIGN_NOTES 변경 이력 2026-10-28).
 - `sections.keywords` · `questions`, `documents.keywords` · `questions`는 질의 처리에서 읽지 않고 Qdrant 재색인 입력으로만 씁니다.
 
 ---
 
 ## 8. 정합성 점검
 
-`uv run python -m ingest check` (sync 끝에도 실행)가 확인하는 불변식입니다.
+아래 불변식 중 첫 줄은 `load`가 판마다 트랜잭션 안에서, 나머지는 `uv run python -m ingest check`(sync 끝에도 실행)가 확인합니다.
 
 | 불변식 | 확인 방법 |
 | :--- | :--- |
@@ -293,14 +295,15 @@ stateDiagram-v2
 
 ---
 
-## 9. 현재 규모 (로컬, 2026-10-28)
+## 9. 현재 규모 (로컬, 2026-10-29)
 
-| 문서 | `id` | sections | chunks | tools |
-| :--- | :--- | :---: | :---: | :---: |
-| 맞춤형복리후생제도 운영지침 | `46e9cf81e6af` | 8 | 25 | 0 |
-| 보수규정 시행세칙 | `e1f17de5627c` | 8 | 98 | 0 |
-
-ALIO 138건을 적재하면 다시 셉니다(DB_LOADING_PLAN §10 6단계).
+| 테이블 | 행 | 비고 |
+| :--- | ---: | :--- |
+| `documents` | 138 | 모두 `INDEXED` · 현행, 규정 138개 |
+| `sections` | 1,263 | |
+| `chunks` | 6,572 | 수치 child 2,023, `verified` 0 |
+| `tools` | 11 | 4개 문서, 모두 `formula` |
+| `document_tools` | 11 | 모두 `ingest` |
 
 ---
 
@@ -309,3 +312,4 @@ ALIO 138건을 적재하면 다시 셉니다(DB_LOADING_PLAN §10 6단계).
 | 날짜 | 내용 |
 | :--- | :--- |
 | 2026-10-29 | 최초 작성: `0001_init` 스키마와 `ingest/` · `backend/search.py` 구현 기준으로 테이블 · 제약 · 값 규칙 · 상태 · 쓰기 · 읽기 · 점검 정리 |
+| 2026-10-29 | 정합성 정리: 도구 읽기(`_list_tools`) 추가, `manual` 연결 주의, 판 되살리기 절차, 점검 주체 구분, 138건 규모로 갱신 |
