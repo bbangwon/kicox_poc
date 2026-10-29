@@ -3,7 +3,6 @@ import { fetchInfo, streamChat } from './api'
 import { ChatPanel } from './components/ChatPanel'
 import { RefreshIcon } from './components/icons'
 import { ScenarioPanel } from './components/ScenarioPanel'
-import { Sidebar } from './components/Sidebar'
 import { SidePanel, type SideTab } from './components/SidePanel'
 import { applyEvent, newRun } from './runReducer'
 import type { Info, Run } from './types'
@@ -78,7 +77,6 @@ export default function App() {
 
   return (
     <div className="shell">
-      <Sidebar info={info} />
       <div className="main">
         <header className="bar">
           <h1 className="service">내부규정</h1>

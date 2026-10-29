@@ -1,5 +1,5 @@
 /* 내부규정 Q&A 테스트 화면. 원 프로젝트 국회대응 답변 작성 화면을 따른다:
-   셸(AppShell · Sidebar · TopBar), ① 대화창(ChatPanel.module.css), ③ 근거 탭(AnswerWorkspace.module.css).
+   셸(AppShell · TopBar), ① 대화창(ChatPanel.module.css), ③ 근거 탭(AnswerWorkspace.module.css).
    색은 토큰만 쓰고, 상태색(success · warning · danger · info)은 상태 표시에만 쓴다. */
 
 /* ── 셸 ─────────────────────────────────────────────────── */
@@ -15,70 +15,6 @@
   flex-direction: column;
 }
 
-.side {
-  flex: 0 0 240px;
-  display: flex;
-  flex-direction: column;
-  background: var(--dx-side-bg);
-  border-right: 1px solid var(--dx-side-border);
-}
-.side-band {
-  height: var(--dx-band-h);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 16px 0 22px;
-  border-bottom: 1px solid var(--dx-side-border);
-}
-.logo {
-  font-size: var(--dx-text-lg);
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  color: var(--dx-primary-700);
-}
-.logo b {
-  color: var(--dx-primary);
-}
-.side-nav {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 12px 20px;
-}
-.side-group {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-height: 38px;
-  padding: 9px 11px;
-  font-size: var(--dx-text-md);
-  font-weight: 600;
-}
-.side-group-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-}
-.side-children {
-  display: grid;
-  gap: 1px;
-  margin: 2px 0 6px;
-  padding: 2px 0 2px 40px;
-}
-.side-child {
-  display: flex;
-  padding: 7px 10px;
-  border-radius: var(--dx-radius-sm);
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--dx-text-muted);
-}
-.side-child.active {
-  color: var(--dx-side-active-fg);
-  background: var(--dx-side-active-bg);
-  font-weight: 700;
-}
 .side-section {
   margin: 18px 11px 6px;
   font-size: var(--dx-text-xs);
@@ -88,31 +24,6 @@
 }
 .scenario-group .side-section {
   margin: 14px 2px 6px;
-}
-.side-docs {
-  margin: 0;
-  padding: 0 4px;
-  list-style: none;
-  display: grid;
-  gap: 2px;
-}
-.side-docs li {
-  display: flex;
-  flex-direction: column;
-  padding: 7px 8px;
-  border-radius: var(--dx-radius-sm);
-}
-.side-docs li:hover {
-  background: var(--dx-surface-alt);
-}
-.side-doc-name {
-  font-size: var(--dx-text-sm);
-  font-weight: 600;
-}
-.side-doc-meta {
-  font-size: var(--dx-text-xs);
-  color: var(--dx-text-subtle);
-  font-variant-numeric: tabular-nums;
 }
 
 .bar {
